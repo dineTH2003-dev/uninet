@@ -29,31 +29,46 @@ Whenever your laptop connects to university Wi-Fi, UniNet silently logs you in. 
 
 ---
 
-## 🚀 Quick Install
+## 🚀 1-Line Web Installation (Recommended)
 
-Clone the repository to get started:
-```bash
-git clone https://github.com/dineTH2003-dev/uninet.git
-cd uninet
-```
+No manual downloads or `git clone` needed. Simply copy and paste the command for your operating system into your terminal:
 
-### 🐧 Linux & 🍎 macOS (Auto-Detect)
-Run in your terminal:
+### 🐧 Linux & 🍎 macOS
+Open your terminal and run:
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/install.sh | bash
 ```
-- On **Linux**: Automatically installs the NetworkManager dispatcher hook (`/etc/NetworkManager/dispatcher.d`).
-- On **macOS**: Automatically installs the native `launchd` LaunchAgent (`~/Library/LaunchAgents`).
+- **Zero Configuration**: Automatically detects your OS (Linux vs macOS).
+- **Auto-Dependency Healing**: Automatically detects and installs required system packages (`curl`, `NetworkManager`) via `apt`, `dnf`, `pacman`, or `zypper`.
+- **Zero-Touch Background Hook**: Automatically configures NetworkManager dispatcher on Linux or `launchd` on macOS.
 
 ---
 
 ### 🪟 Windows (Windows 10 & 11)
 Open **PowerShell as Administrator** and run:
 ```powershell
+irm https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/scripts/windows/install.ps1 | iex
+```
+- **Native & Dependency-Free**: 100% pure PowerShell. No Python or extra software required.
+- **Event-Driven**: Registers Windows Task Scheduler hook for `WLAN-AutoConfig` Event 8001.
+- **Global Command**: Adds `uninet` directly to your system PATH for CMD and PowerShell.
+
+---
+
+## 📦 Alternative: Local Installation
+
+If you prefer cloning the repository manually:
+```bash
+git clone https://github.com/dineTH2003-dev/uninet.git
+cd uninet
+
+# Linux & macOS:
+./install.sh
+
+# Windows (Run PowerShell as Administrator):
 Set-ExecutionPolicy Bypass -Scope Process -Force
 .\scripts\windows\install.ps1
 ```
-*Uses native Windows Task Scheduler hooked to `WLAN-AutoConfig` Event 8001.*
 
 ---
 
@@ -71,6 +86,12 @@ Unlike tools that run heavy background loops, UniNet uses an **event-driven arch
 
 ### Linux & macOS:
 ```bash
+# Automatically find and switch to highest-speed / 5 GHz campus AP
+uninet optimize
+
+# Scan and display all visible campus networks with quality scores
+uninet scan
+
 # Check current connection status
 uninet status
 
@@ -84,16 +105,22 @@ uninet login
 uninet uninstall
 ```
 
-### Windows (PowerShell):
+### Windows (PowerShell / Command Prompt):
 ```powershell
+# Automatically find and switch to highest-speed / 5 GHz campus AP
+uninet optimize
+
+# Scan and display all visible campus networks with quality scores
+uninet scan
+
 # Check current status
-uninet.ps1 status
+uninet status
 
 # Reconfigure username or password
-uninet.ps1 setup
+uninet setup
 
 # Force manual login
-uninet.ps1 login
+uninet login
 ```
 
 ---
