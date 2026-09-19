@@ -8,10 +8,6 @@
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "         UniNet Windows Auto-Connect Installer         " -ForegroundColor Cyan
-Write-Host "=======================================================`n" -ForegroundColor Cyan
-
 # 1. Target Paths & Source Acquisition
 $InstallDir = "C:\ProgramData\uninet"
 $RepoRawUrl = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
@@ -38,13 +34,20 @@ if ($PSScriptRoot) {
 if ($LocalScript) {
     Copy-Item -Path $LocalScript -Destination $ScriptDest -Force
 } else {
-    Write-Host "Fetching latest uninet engine from GitHub..." -ForegroundColor Cyan
     try {
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
     } catch { }
     $wc = New-Object System.Net.WebClient
     $wc.Headers.Add("User-Agent", "UniNet-Installer")
     $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $ScriptDest)
+}
+
+# Copy logo asset if available locally
+if ($PSScriptRoot) {
+    $LocalAsset = Join-Path $PSScriptRoot "..\..\assets\uom_logo.ans"
+    if (Test-Path $LocalAsset) {
+        Copy-Item -Path $LocalAsset -Destination "$InstallDir\uom_logo.ans" -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # Create uninet.cmd wrapper so users can type 'uninet' in CMD or PowerShell
@@ -58,22 +61,16 @@ if ($MachinePath -notlike "*$InstallDir*") {
     try {
         [Environment]::SetEnvironmentVariable("Path", "$MachinePath;$InstallDir", "Machine")
         $env:Path = "$env:Path;$InstallDir"
-        Write-Host "[+] Added $InstallDir to System PATH" -ForegroundColor Green
     } catch {
         $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
         if ($UserPath -notlike "*$InstallDir*") {
             [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
             $env:Path = "$env:Path;$InstallDir"
-            Write-Host "[+] Added $InstallDir to User PATH" -ForegroundColor Green
         }
     }
 }
 
-Write-Host "[+] Installed uninet engine to $ScriptDest" -ForegroundColor Green
-
 # 2. Register Windows Task Scheduler trigger on Wi-Fi Connection (Event 8001)
-Write-Host "Registering background auto-connect trigger..." -ForegroundColor Cyan
-
 $TaskName = "UniNetAutoConnect"
 $Action = "powershell.exe"
 $Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptDest`" login -Quiet"
@@ -115,24 +112,8 @@ $TaskXml = @"
 $TempXml = "$env:TEMP\uninet_task.xml"
 [System.IO.File]::WriteAllText($TempXml, $TaskXml, [System.Text.Encoding]::Unicode)
 
-$createResult = cmd.exe /c "schtasks /create /tn `"$TaskName`" /xml `"$TempXml`" /f 2>&1"
+$createResult = cmd.exe /c "schtasks /create /tn `"$TaskName`" /xml `"$TempXml`" /f >nul 2>nul"
 Remove-Item $TempXml -Force -ErrorAction SilentlyContinue
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "[+] Task Scheduler trigger '$TaskName' registered successfully!" -ForegroundColor Green
-} else {
-    Write-Host "Notice: Administrator privileges are required to register background Task Scheduler triggers." -ForegroundColor Yellow
-    Write-Host "        (UniNet CLI is still fully functional via 'uninet login' / 'uninet status')" -ForegroundColor Yellow
-}
 
 # 3. Launch interactive credentials setup in a dedicated PowerShell process
 & powershell.exe -ExecutionPolicy Bypass -NoProfile -File "$ScriptDest" setup
-
-Write-Host "`n=======================================================" -ForegroundColor Green
-Write-Host "[+] UniNet for Windows is fully installed!" -ForegroundColor Green
-Write-Host "Whenever your Windows laptop connects to university Wi-Fi:" -ForegroundColor Green
-Write-Host "  - UoM_Wireless" -ForegroundColor Green
-Write-Host "  - UoM.Wireless" -ForegroundColor Green
-Write-Host "  - UoM-Wireless" -ForegroundColor Green
-Write-Host "It will automatically authenticate in the background!" -ForegroundColor Green
-Write-Host "=======================================================`n" -ForegroundColor Green

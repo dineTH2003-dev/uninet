@@ -176,23 +176,44 @@ function Show-UniStatus {
     }
 }
 
-# 7. Setup Wizard
+# 7. University of Moratuwa Official Terminal Crest & Setup Wizard
+function Show-UoMLogo {
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        $assetFile = "C:\ProgramData\uninet\uom_logo.ans"
+        if (Test-Path $assetFile) {
+            Get-Content -Raw -Encoding UTF8 $assetFile | Write-Host
+            return
+        }
+        $b64 = "H4sIADvJrmoC/62ay5HbMAyG72lhLylBEkmRGh9SyDaQQ9xFakiBqSQPWxQBfgDpTTI7k5HMF4AfwE9Ab+9ftvTt7X25f/7gvz9zP1k/hXJLtyPe4uP/+88f3x971Z8er/4+rGFvnlIRP+Xm6THLGNru8v8OXM+xPH6SZ5VPero443J/e893PW+512GPuVtI6hex2hZ2d4+XRa/rRrW/oRA2ktBJLqiqvMHJt/X5FJ9jmqfnb8LidZVGgx+XOZ0yD61Y9V6PiGo4x5ReDGXnOkbion2rFn0ccrTuv3lBvoMzaXUdtG8LQcaqobXtHwyp/bau9XzSqGVD13FCuoE3NkLrPbKUtjtcM9Q3liF4nR3uzi5RjDEF1Q6Wtt42xq/dAjMqkyZoXNBRBepBYAkVngqYlQB4tE8xnyfK4nU4Xx94/hjE6+18LawRc3fYZoU4sV88+HTLbSBl44MSGYZzKBUFwzqeaaZySruJFGlHScOB6roUHgj+oYf/7ylyAYr28uRXjmZjqzUSaVBPEceNwjeiWC4W1kcGy/eq3SHZvGTVXjMcSjNFmOcolSqUv1ketDpG09FDn9E2sc7yYNh1Ia+SBGBlpBgcIhB+LlRtFKt9wIjzxqc61mUjl1HxoPPCVg7EhQcLykV2AK6wVVgoN3KES/h9bGYVuFKXrrXllOecKlxaXsoEVzPZWyRKWxyWNrr+NCE0OKKDrsQqaTn12iaTMgcLfRAjUffg0If1NxKBj3Pf4of+RhcIl0DXkulDKfMCZATrt7G/qmOhMGI6WJmzYIwqaLqungpGIabjUylhKs1fhwxoXUWwNg7xSHfT0NeqsRQITLvDq4b105r23SgQJU+9RxbkQXGf8tPdt6Pnp5y0kkssCiHuoqmuq6ILaF8Zxg6O0VUP67DcYF2pp4s7xIPcDE+U87Rzmoh5tvUT6fUVV341btRgnfkStbvO7ORvJ6SswunhRm7wTywX9ptaGRiMh0kLQ3J+hS33d7LThON03Fp3RNrF1OZmwHWN3bxpsOJO1KdFcJH1PEsZkzm3ojpPagkw40iNYWYKHJeMCZ05rZNo8GrIXvHbSupBVWgQM80FMRlVai7pyM11WKeELU0B+b9QcClMD/fBZTBQ8G2nQDlMaS62B8kM5MM1clxG4rPHd6aMJjB8+3YhZIx5qlyKLYyiQn/vTUOyDexXqEyaoN4jVZC5aAmWyeoFGUlK5S6Fd1qpnB8TWnsd5iasD6RGh9koFxsEjTy+L9KLZTumKBkCxJymtjvVE8A+lUZMLyheiO9GXcsElfPXqSIPqK/hYt5lcnwp6VyxIWyKrHm2MC48LxuGvZmKhlY2apGqa3WpeO1MDmSGsQ1lpv4GNATXU3Coi06QjlGmrrBqiXjHwt1yiWvbOWfTRsVeFJNNrKlrtQYxH02ouP3OrTQLGaNbbLbafAZsXiR7UCFh7Ocu++aR9yDkNvj2odfWOPz2XM6L/V5bB9rDHjEcuYnPMCArEYiyGXJdMm3z6b4DSdoYSCWdo/PNyWg4YU7JQow+j0nfoIV6hWwjgY2u3k7H6fCTd99uLi83qLhipD8bgSIPu2s07lgebjAKcbtBNpNq+WkZYdKW//q+BNtUXDphEKnq9jYutnU4bytsWFMzveezWWFzPjzaZJdmvtsjhROFfKfYVKchyCdsJnBkCNNRW+OzqjUstryj8urlFvQdF32VZQIr2J0xaRKn2bLaVX3Wgs8jueMzF+dN2h1Q6ZNw7JpIE4Nx5BHNbu3E51OTH3m+/flW9OsvY7oRozIqAAA="
+        $bytes = [System.Convert]::FromBase64String($b64)
+        $ms = New-Object System.IO.MemoryStream(,$bytes)
+        $gz = New-Object System.IO.Compression.GZipStream($ms, [System.IO.Compression.CompressionMode]::Decompress)
+        $sr = New-Object System.IO.StreamReader($gz)
+        $logo = $sr.ReadToEnd()
+        Write-Host $logo
+    } catch { }
+}
+
 function Invoke-UniSetup {
-    Write-Host "`n================================================" -ForegroundColor Cyan
-    Write-Host "        UniNet Windows Fast Setup Wizard        " -ForegroundColor Cyan
-    Write-Host "================================================`n" -ForegroundColor Cyan
+    Show-UoMLogo
+    Write-Host "========================================================" -ForegroundColor Cyan
+    Write-Host "         UNIVERSITY OF MORATUWA • CAMPUS WI-FI          " -ForegroundColor Cyan
+    Write-Host "               UniNet Auto-Connect Engine               " -ForegroundColor Cyan
+    Write-Host "========================================================`n" -ForegroundColor Cyan
 
     $ssid = Get-ActiveSSID
-    if (-not $ssid) { $ssid = "UoM_Wireless" }
-    Write-Host "Detected Wi-Fi: $ssid`n"
+    if ($ssid) {
+        Write-Host "Active Wi-Fi: $ssid`n"
+    }
 
-    $username = Read-Host "Student Username / ID"
+    $username = Read-Host "Student Username / ID "
     if ([string]::IsNullOrWhiteSpace($username)) {
         Write-Host "Error: Username cannot be empty." -ForegroundColor Red
         return
     }
 
-    $password = Read-Host "Password" -AsSecureString
+    $password = Read-Host "Network Password      " -AsSecureString
     $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
     $plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
 
@@ -221,9 +242,22 @@ function Invoke-UniSetup {
         Set-Content -Path "$sysDir\credentials.json" -Value $data -Encoding UTF8 -ErrorAction SilentlyContinue
     }
 
-    Write-Host "`n[+] Credentials saved locally in $CredsFile" -ForegroundColor Green
-    Write-Host "`nTesting connection now..."
-    Invoke-UniLogin
+    # Quiet connection test if currently connected to campus Wi-Fi
+    if ($ssid -and (Test-UniversityNetwork $ssid)) {
+        if (-not (Test-IsOnline)) {
+            Invoke-UniLogin -Quiet
+        }
+    }
+
+    Write-Host "`n========================================================" -ForegroundColor Green
+    Write-Host "✔ Credentials securely saved!" -ForegroundColor Green
+    Write-Host "✨ You are all set!`n" -ForegroundColor Green
+    Write-Host "Whenever your Windows laptop connects to university Wi-Fi:" -ForegroundColor Green
+    Write-Host "  • UoM_Wireless" -ForegroundColor Green
+    Write-Host "  • UoM.Wireless" -ForegroundColor Green
+    Write-Host "  • UoM-Wireless" -ForegroundColor Green
+    Write-Host "UniNet will automatically authenticate in the background!" -ForegroundColor Green
+    Write-Host "========================================================`n" -ForegroundColor Green
 }
 
 # 8. Wi-Fi Multi-Factor Quality Scoring & Network Scanning
