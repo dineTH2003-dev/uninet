@@ -5,7 +5,7 @@
 Write-Host "Uninstalling UniNet for Windows..." -ForegroundColor Yellow
 
 $TaskName = "UniNetAutoConnect"
-schtasks /delete /tn $TaskName /f 2>$null | Out-Null
+$null = & schtasks /delete /tn $TaskName /f 2>&1
 
 $InstallDir = "C:\ProgramData\uninet"
 if (Test-Path $InstallDir) {

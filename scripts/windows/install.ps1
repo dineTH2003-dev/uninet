@@ -14,7 +14,10 @@ Write-Host "=======================================================`n" -Foregrou
 
 # 1. Target Paths
 $InstallDir = "C:\ProgramData\uninet"
-$ScriptSrc = "$PSScriptRoot\bin\uninet.ps1"
+$ScriptSrc = Join-Path $PSScriptRoot "..\..\bin\uninet.ps1"
+if (-not (Test-Path $ScriptSrc)) {
+    $ScriptSrc = Join-Path $PSScriptRoot "bin\uninet.ps1"
+}
 $ScriptDest = "$InstallDir\uninet.ps1"
 
 if (-not (Test-Path $InstallDir)) {
@@ -32,7 +35,7 @@ $Action = "powershell.exe"
 $Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptDest`" login -Quiet"
 
 # Unregister if previously installed
-schtasks /delete /tn $TaskName /f 2>$null | Out-Null
+$null = & schtasks /delete /tn $TaskName /f 2>&1
 
 # XML trigger for WLAN-AutoConfig Event 8001 (Connection Succeeded)
 $TaskXml = @"
