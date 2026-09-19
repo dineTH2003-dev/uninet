@@ -122,7 +122,7 @@ function Invoke-UniLogin {
     $landingUrl = $ProbeUrl
     try {
         # Allow untrusted SSL for internal university gateways
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
         $resp = Invoke-WebRequest -Uri $ProbeUrl -SessionVariable "session" -MaximumRedirection 5 -TimeoutSec 8 -UseBasicParsing
         $landingUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
     } catch {
@@ -149,7 +149,7 @@ function Invoke-UniLogin {
     Start-Sleep -Seconds 1
 
     if (Test-IsOnline) {
-        Write-UniLog "✔ Successfully connected! Internet is now active on $ssid." "Green"
+        Write-UniLog "[+] Successfully connected! Internet is now active on $ssid." "Green"
     } else {
         Write-UniLog "Notice: Login submitted. Verifying connection status..." "Yellow"
     }
@@ -221,19 +221,202 @@ function Invoke-UniSetup {
         Set-Content -Path "$sysDir\credentials.json" -Value $data -Encoding UTF8 -ErrorAction SilentlyContinue
     }
 
-    Write-Host "`n✔ Credentials saved locally in $CredsFile" -ForegroundColor Green
+    Write-Host "`n[+] Credentials saved locally in $CredsFile" -ForegroundColor Green
     Write-Host "`nTesting connection now..."
     Invoke-UniLogin
 }
 
-# 8. Command Router
-switch ($Command.ToLower()) {
-    "login"   { Invoke-UniLogin }
-    "status"  { Show-UniStatus }
-    "setup"   { Invoke-UniSetup }
-    "help"    {
-        Write-Host "UniNet Windows v$Version"
-        Write-Host "Usage: .\uninet.ps1 [status | login | setup]"
+# 8. Wi-Fi Multi-Factor Quality Scoring & Network Scanning
+function Get-CampusNetworks([string]$FilterMode = "campus") {
+    $networks = @()
+    $activeSSID = Get-ActiveSSID
+
+    try {
+        $lines = netsh wlan show networks mode=bssid
+    } catch {
+        return $networks
     }
-    default   { Invoke-UniLogin }
+
+    $currentSSID = ""
+    $currentBSSID = ""
+    $currentSignal = 0
+    $currentBand = "2.4 GHz"
+    $currentRadio = "802.11n"
+
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+
+        if ($trimmed -match "^SSID\s+\d+\s*:\s*(.*)$") {
+            $currentSSID = $matches[1].Trim()
+            continue
+        }
+
+        if ($trimmed -match "^BSSID\s+\d+\s*:\s*(.*)$") {
+            $currentBSSID = $matches[1].Trim()
+            continue
+        }
+
+        if ($trimmed -match "^Signal\s*:\s*(\d+)%") {
+            $currentSignal = [int]$matches[1]
+            continue
+        }
+
+        if ($trimmed -match "^Radio type\s*:\s*(.*)$") {
+            $currentRadio = $matches[1].Trim()
+            continue
+        }
+
+        if ($trimmed -match "^Band\s*:\s*(.*)$") {
+            $currentBand = $matches[1].Trim()
+            continue
+        }
+
+        if ($trimmed -match "^Channel\s*:\s*(\d+)") {
+            $channel = [int]$matches[1]
+            if ($channel -ge 36) {
+                $currentBand = "5.0 GHz"
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($currentSSID)) {
+                $include = $false
+                if ($FilterMode -eq "all") {
+                    $include = $true
+                } elseif (Test-UniversityNetwork $currentSSID) {
+                    $include = $true
+                }
+
+                if ($include) {
+                    $is5GHz = ($currentBand -like "*5*" -or $channel -ge 36)
+                    $rate = 130
+                    if ($currentRadio -like "*ac*") {
+                        $rate = 866
+                    } elseif ($currentRadio -like "*ax*") {
+                        $rate = 1201
+                    } elseif ($is5GHz) {
+                        $rate = 433
+                    }
+
+                    $isActive = ($currentSSID -eq $activeSSID)
+
+                    # Multi-factor score calculation
+                    $sigScore = [math]::Round($currentSignal * 0.35, 1)
+                    $bandBonus = 0
+                    if ($is5GHz -and $currentSignal -ge 20) {
+                        $bandBonus = 30
+                    }
+                    $rateScore = [math]::Round(([math]::Min($rate, 866) / 866.0) * 35, 1)
+                    $actBonus = 0
+                    if ($isActive) {
+                        $actBonus = 12
+                    }
+
+                    $totalScore = $sigScore + $bandBonus + $rateScore + $actBonus
+
+                    $obj = [PSCustomObject]@{
+                        Score    = [math]::Round($totalScore, 1)
+                        IsActive = $isActive
+                        SSID     = $currentSSID
+                        BSSID    = $currentBSSID
+                        Band     = if ($is5GHz) { "5.0 GHz" } else { "2.4 GHz" }
+                        Rate     = "$rate Mbit/s"
+                        Signal   = "$currentSignal%"
+                    }
+                    $networks += $obj
+                }
+            }
+            continue
+        }
+    }
+
+    return ($networks | Sort-Object -Property Score -Descending)
+}
+
+function Show-CampusScan {
+    Write-UniLog "Scanning for available Wi-Fi networks..." "Cyan"
+    $results = Get-CampusNetworks "campus"
+
+    if (-not $results -or $results.Count -eq 0) {
+        Write-Host "Notice: No university campus networks detected in range." -ForegroundColor Yellow
+        Write-Host "Showing nearby Wi-Fi networks for diagnosis:`n" -ForegroundColor Gray
+        $results = Get-CampusNetworks "all"
+    } else {
+        Write-Host "`nDetected Campus Networks:" -ForegroundColor Cyan
+    }
+
+    if (-not $results -or $results.Count -eq 0) {
+        Write-Host "No Wi-Fi networks found."
+        return
+    }
+
+    $activeItem = $results | Where-Object { $_.IsActive } | Select-Object -First 1
+    $activeScore = if ($activeItem) { $activeItem.Score } else { 0 }
+
+    Write-Host ("{0,-9} {1,-18} {2,-18} {3,-9} {4,-12} {5,-8} {6,-6}" -f "STATUS", "SSID", "BSSID", "BAND", "RATE", "SIGNAL", "SCORE")
+    Write-Host "----------------------------------------------------------------------------------"
+
+    foreach ($net in $results) {
+        $status = "      "
+        $suffix = ""
+        if ($net.IsActive) {
+            $status = "* ACTIVE"
+        } elseif ($activeScore -gt 0 -and $net.Score -ge ($activeScore + 15)) {
+            $status = "  BETTER"
+            $suffix = " (+)"
+        }
+
+        $line = "{0,-9} {1,-18} {2,-18} {3,-9} {4,-12} {5,-8} {6,-6}{7}" -f $status, ($net.SSID -replace '^(.{18}).+$', '$1'), $net.BSSID, $net.Band, $net.Rate, $net.Signal, $net.Score, $suffix
+        Write-Host $line
+    }
+    Write-Host ""
+}
+
+function Optimize-Connection {
+    Write-UniLog "Evaluating campus Wi-Fi networks for optimal bandwidth and speed..." "Cyan"
+    $results = Get-CampusNetworks "campus"
+
+    if (-not $results -or $results.Count -eq 0) {
+        Write-UniLog "No university networks detected in range. Checking standard login..." "Yellow"
+        Invoke-UniLogin
+        return
+    }
+
+    $top = $results[0]
+    $active = $results | Where-Object { $_.IsActive } | Select-Object -First 1
+
+    $activeScore = if ($active) { $active.Score } else { 0 }
+    $activeSSID = if ($active) { $active.SSID } else { "" }
+
+    $threshold = $activeScore + 15
+
+    if ($top.IsActive -or $top.SSID -eq $activeSSID) {
+        Write-UniLog "Current connection '$activeSSID' is already the best available (Quality Score: $($top.Score))." "Green"
+    } elseif ($top.Score -ge $threshold) {
+        $diff = [math]::Round($top.Score - $activeScore, 1)
+        Write-UniLog "Found significantly faster connection: '$($top.SSID)' (+$diff pts higher quality, $($top.Band), $($top.Rate))." "Green"
+        Write-UniLog "Switching connection to '$($top.SSID)'..." "Cyan"
+
+        $null = cmd.exe /c "netsh wlan connect name=`"$($top.SSID)`""
+        Start-Sleep -Seconds 2
+        Write-UniLog "[+] Connected to $($top.SSID)!" "Green"
+    } else {
+        Write-UniLog "Current connection '$activeSSID' is optimal (candidate difference is within 15-point stability margin)." "Yellow"
+    }
+
+    Write-UniLog "Probing captive portal..." "Cyan"
+    Invoke-UniLogin
+}
+
+# 9. Command Router
+switch ($Command.ToLower()) {
+    "login"      { Invoke-UniLogin }
+    "optimize"   { Optimize-Connection }
+    "best"       { Optimize-Connection }
+    "scan"       { Show-CampusScan }
+    "status"     { Show-UniStatus }
+    "setup"      { Invoke-UniSetup }
+    "help"       {
+        Write-Host "UniNet Windows v$Version"
+        Write-Host "Usage: .\uninet.ps1 [login | optimize | scan | status | setup]"
+    }
+    default      { Invoke-UniLogin }
 }
