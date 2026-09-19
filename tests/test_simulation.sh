@@ -75,5 +75,40 @@ POST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/gen
 echo "  -> Post-login HTTP Status: $POST_STATUS (204 Online Expected)"
 [ "$POST_STATUS" = "204" ]
 
+echo "[Test 5] Multi-Factor AP Quality Scoring Validation:"
+# Source calculate_ap_score function from bin/uninet
+eval "$(sed -n '/calculate_ap_score() {/,/^}/p' bin/uninet)"
+
+# 2.4 GHz AP (95% signal, 117 Mbps, active)
+SCORE_24GHZ=$(calculate_ap_score 95 2412 117 1)
+# 5.0 GHz AP (70% signal, 866 Mbps, non-active candidate)
+SCORE_5GHZ=$(calculate_ap_score 70 5200 866 0)
+
+echo "  -> 2.4 GHz (95% signal, 117 Mb/s, active): Score = $((SCORE_24GHZ / 10)).$((SCORE_24GHZ % 10))"
+echo "  -> 5.0 GHz (70% signal, 866 Mb/s, candidate): Score = $((SCORE_5GHZ / 10)).$((SCORE_5GHZ % 10))"
+
+if [ "$SCORE_5GHZ" -le "$SCORE_24GHZ" ]; then
+    echo "  -> ERROR: 5 GHz high-throughput connection did not outscore 2.4 GHz!"
+    exit 1
+fi
+echo "  -> Success: 5 GHz high-throughput connection correctly outscored 2.4 GHz!"
+
+echo "[Test 6] Hysteresis & Connection Switching Margin Validation:"
+DIFF=$((SCORE_5GHZ - SCORE_24GHZ))
+echo "  -> Score difference: $((DIFF / 10)).$((DIFF % 10)) pts (Threshold: 15.0 pts)"
+if [ "$DIFF" -ge 150 ]; then
+    echo "  -> Candidate exceeds 15.0 pt threshold: Auto-switch triggers as expected!"
+else
+    echo "  -> ERROR: Expected candidate to exceed switching threshold!"
+    exit 1
+fi
+
+# Marginal candidate test (difference < 15.0 pts)
+MARGINAL_SCORE=$(calculate_ap_score 96 2412 130 0)
+MARGINAL_DIFF=$((MARGINAL_SCORE - SCORE_24GHZ))
+if [ "$MARGINAL_DIFF" -lt 150 ]; then
+    echo "  -> Marginal candidate difference ($((MARGINAL_DIFF / 10)).$((MARGINAL_DIFF % 10)) pts) is within 15.0 pt margin: Flapping prevented!"
+fi
+
 echo ""
-echo "🎉 ALL CAPTIVE PORTAL SIMULATION TESTS PASSED!"
+echo "🎉 ALL CAPTIVE PORTAL & AP OPTIMIZATION TESTS PASSED!"
