@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# UniNet - Lightweight University Wi-Fi Auto-Connect Engine
+#
+# Supported Networks:
+#   - UoM_Wireless
+#   - UoM.Wireless
+#   - UoM-Wireless
+#
+# Zero Python runtime, zero pip packages. Pure Linux coreutils + curl.
+# ==============================================================================
+
+set -eo pipefail
+
+VERSION="1.0.0"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
+USER_CREDS="$CONFIG_DIR/credentials.json"
+SYSTEM_CREDS="/etc/uninet/credentials.json"
+COOKIE_JAR="/tmp/uninet_cookies_$UID.txt"
+PROBE_URL="http://connectivitycheck.gstatic.com/generate_204"
+
+# University SSIDs to match
+MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless" "uom" "wireless" "campus" "eduroam")
+
+# Terminal colors (disabled if not in terminal)
+if [ -t 1 ]; then
+    BOLD="\033[1m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    CYAN="\033[36m"
+    RED="\033[31m"
+    RESET="\033[0m"
+else
+    BOLD=""
+    GREEN=""
+    YELLOW=""
+    CYAN=""
+    RED=""
+    RESET=""
+fi
+
+log() {
+    echo -e "${CYAN}[UniNet]${RESET} $*"
+}
+
+# 1. Get currently connected Wi-Fi SSID
+get_active_ssid() {
+    if command -v nmcli &>/dev/null; then
+        nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | grep '^yes:' | cut -d':' -f2 | head -n 1 || true
+    else
+        echo ""
+    fi
+}
+
+# 2. Check if SSID matches university patterns
+is_university_network() {
+    local ssid="$1"
+    local ssid_lower="${ssid,,}"
+    for pat in "${MATCH_PATTERNS[@]}"; do
+        if [[ "$ssid_lower" == *"$pat"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 3. Check if we already have direct internet access (HTTP 204)
+is_online() {
+    local code
+    code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 4 "$PROBE_URL" || true)"
+    [ "$code" = "204" ]
+}
+
+# 4. Read credentials safely from user or system config
+get_credentials() {
+    local target_file=""
+    if [ -f "$USER_CREDS" ]; then
+        target_file="$USER_CREDS"
+    elif [ -f "$SYSTEM_CREDS" ]; then
+        target_file="$SYSTEM_CREDS"
+    else
+        # If running as root (dispatcher), search home directories
+        for f in /home/*/.config/uninet/credentials.json; do
+            if [ -f "$f" ]; then
+                target_file="$f"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$target_file" ] || [ ! -f "$target_file" ]; then
+        return 1
+    fi
+
+    USERNAME="$(grep -o '"username"[[:space:]]*:[[:space:]]*"[^"]*"' "$target_file" | head -n 1 | cut -d'"' -f4)"
+    PASSWORD="$(grep -o '"password"[[:space:]]*:[[:space:]]*"[^"]*"' "$target_file" | head -n 1 | cut -d'"' -f4)"
+
+    [ -n "$USERNAME" ] && [ -n "$PASSWORD" ]
+}
+
+# 5. Core Login Flow
+cmd_login() {
+    local quiet=0
+    if [ "$1" = "--quiet" ] || [ "$1" = "-q" ]; then
+        quiet=1
+    fi
+
+    local ssid
+    ssid="$(get_active_ssid)"
+
+    if [ -z "$ssid" ]; then
+        [ $quiet -eq 0 ] && log "No active Wi-Fi connection detected."
+        exit 0
+    fi
+
+    # 2ms exit if not on university network
+    if ! is_university_network "$ssid"; then
+        [ $quiet -eq 0 ] && log "Connected to non-university Wi-Fi ($ssid). Exiting."
+        exit 0
+    fi
+
+    # Check if already online
+    if is_online; then
+        [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
+        exit 0
+    fi
+
+    [ $quiet -eq 0 ] && log "Captive portal detected on ${BOLD}$ssid${RESET}. Authenticating..."
+
+    if ! get_credentials; then
+        log "${RED}Error: No saved credentials found. Run 'uninet setup' first.${RESET}"
+        exit 1
+    fi
+
+    # Probe portal to capture redirect URL and session cookies
+    rm -f "$COOKIE_JAR"
+    local probe_output
+    probe_output="$(curl -s -i -c "$COOKIE_JAR" -L --max-redirs 5 --connect-timeout 8 "$PROBE_URL" 2>/dev/null || true)"
+    
+    local final_url
+    final_url="$(echo "$probe_output" | grep -i '^Location:' | tail -n 1 | awk '{print $2}' | tr -d '\r\n')"
+
+    # Extract form action URL
+    local action_url
+    action_url="$(echo "$probe_output" | grep -i -o '<form[^>]*action=["'\''"][^"'\'']*["'\'']' | head -n 1 | sed -E 's/.*action=["'\''"]([^"'\'']*)["'\''"].*/\1/')"
+
+    if [ -z "$action_url" ] && [ -n "$final_url" ]; then
+        action_url="$final_url"
+    fi
+
+    if [ -z "$action_url" ]; then
+        action_url="${final_url:-$PROBE_URL}"
+    fi
+
+    [ $quiet -eq 0 ] && log "Submitting login credentials for ${BOLD}$USERNAME${RESET}..."
+
+    # Submit login request with cookies and common university field names
+    curl -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+        -X POST \
+        --data-urlencode "username=$USERNAME" \
+        --data-urlencode "password=$PASSWORD" \
+        --data-urlencode "user=$USERNAME" \
+        --data-urlencode "pass=$PASSWORD" \
+        --data-urlencode "student_id=$USERNAME" \
+        --data-urlencode "student_password=$PASSWORD" \
+        --max-time 10 \
+        "$action_url" > /dev/null 2>&1 || true
+
+    rm -f "$COOKIE_JAR"
+
+    # Confirm post-login status
+    sleep 1
+    if is_online; then
+        [ $quiet -eq 0 ] && log "${GREEN}✔ Successfully connected! Internet is now active on $ssid.${RESET}"
+        exit 0
+    else
+        [ $quiet -eq 0 ] && log "${YELLOW}Notice: Credentials submitted. Checking connection...${RESET}"
+        exit 0
+    fi
+}
+
+# 6. Status check
+cmd_status() {
+    local ssid
+    ssid="$(get_active_ssid)"
+    echo -e "${BOLD}${CYAN}=== UniNet Status ===${RESET}"
+    echo -e "${BOLD}Active Wi-Fi:${RESET}   ${ssid:-None}"
+
+    if [ -n "$ssid" ]; then
+        if is_university_network "$ssid"; then
+            echo -e "${BOLD}University Net:${RESET} ${GREEN}Yes ($ssid)${RESET}"
+        else
+            echo -e "${BOLD}University Net:${RESET} ${YELLOW}No (Home/Other)${RESET}"
+        fi
+    fi
+
+    if is_online; then
+        echo -e "${BOLD}Internet:${RESET}       ${GREEN}ONLINE (Direct Internet Access confirmed)${RESET}"
+    else
+        echo -e "${BOLD}Internet:${RESET}       ${YELLOW}CAPTIVE PORTAL / OFFLINE${RESET}"
+    fi
+}
+
+# 7. Setup Wizard
+cmd_setup() {
+    echo -e "${BOLD}${CYAN}================================================${RESET}"
+    echo -e "${BOLD}${CYAN}            UniNet Fast Setup Wizard            ${RESET}"
+    echo -e "${BOLD}${CYAN}================================================${RESET}\n"
+
+    local current_ssid
+    current_ssid="$(get_active_ssid)"
+    current_ssid="${current_ssid:-UoM_Wireless}"
+
+    echo -e "Detected Wi-Fi: ${BOLD}$current_ssid${RESET}\n"
+
+    read -rp "Student Username / ID: " user_in
+    if [ -z "$user_in" ]; then
+        echo -e "${RED}Error: Username cannot be empty.${RESET}"
+        exit 1
+    fi
+
+    read -rsp "Password: " pass_in
+    echo ""
+    if [ -z "$pass_in" ]; then
+        echo -e "${RED}Error: Password cannot be empty.${RESET}"
+        exit 1
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+    cat << EOF > "$USER_CREDS"
+{
+  "username": "$user_in",
+  "password": "$pass_in"
+}
+EOF
+    chmod 600 "$USER_CREDS"
+    echo -e "\n${GREEN}✔ Credentials saved locally in $USER_CREDS (mode 0600).${RESET}"
+
+    # Also save to system if sudo is available
+    if [ -w "/etc" ] || command -v sudo &>/dev/null; then
+        sudo mkdir -p /etc/uninet 2>/dev/null || true
+        sudo cp "$USER_CREDS" "$SYSTEM_CREDS" 2>/dev/null || true
+        sudo chmod 600 "$SYSTEM_CREDS" 2>/dev/null || true
+    fi
+
+    echo -e "\n${BOLD}Testing connection now...${RESET}"
+    cmd_login
+}
+
+# 8. Uninstaller
+cmd_uninstall() {
+    echo -e "${YELLOW}Uninstalling UniNet...${RESET}"
+    rm -f "$USER_CREDS"
+    rm -rf "$CONFIG_DIR"
+
+    if [ -w "/etc/NetworkManager/dispatcher.d" ] || command -v sudo &>/dev/null; then
+        sudo rm -f /etc/NetworkManager/dispatcher.d/99-uninet.sh 2>/dev/null || true
+        sudo rm -rf /etc/uninet 2>/dev/null || true
+        sudo rm -f /usr/local/bin/uninet 2>/dev/null || true
+    fi
+
+    echo -e "${GREEN}✔ UniNet has been completely uninstalled.${RESET}"
+}
+
+# 9. CLI Route
+case "$1" in
+    login)
+        shift
+        cmd_login "$@"
+        ;;
+    status)
+        cmd_status
+        ;;
+    setup)
+        cmd_setup
+        ;;
+    uninstall)
+        cmd_uninstall
+        ;;
+    --version|-v)
+        echo "UniNet v$VERSION (Pure Bash Engine)"
+        ;;
+    --help|-h|*)
+        echo -e "${BOLD}UniNet v$VERSION${RESET} - University Wi-Fi Auto-Connect"
+        echo ""
+        echo "Usage: uninet <command>"
+        echo ""
+        echo "Commands:"
+        echo "  login        Authenticate with university Wi-Fi portal"
+        echo "  status       Check current Wi-Fi and internet status"
+        echo "  setup        Configure student ID and password"
+        echo "  uninstall    Remove UniNet and background hooks from machine"
+        echo ""
+        ;;
+esac
