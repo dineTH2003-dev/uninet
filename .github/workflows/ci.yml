@@ -42,9 +42,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate PowerShell Scripts
-        shell: pwsh
+        shell: powershell
         run: |
-          $scripts = @("bin/uninet.ps1", "scripts/windows/install.ps1", "scripts/windows/uninstall.ps1")
+          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")
           foreach ($s in $scripts) {
               $tokens = $null
               $errors = $null
@@ -54,5 +54,9 @@ jobs:
                   Write-Error "Syntax error in $s : $errors"
                   exit 1
               }
-              Write-Host "✔ $s passed syntax validation"
+              Write-Host "[+] $s passed AST syntax validation"
           }
+
+          # Verify runtime execution in Windows PowerShell 5.1
+          & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\bin\uninet.ps1" help
+          & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\scripts\windows\uninstall.ps1"
