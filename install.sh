@@ -135,6 +135,17 @@ else
     TARGET_BIN="$USER_BIN"
 fi
 
+# Optional: Install Logo Asset if available locally
+if [ -f "$SCRIPT_DIR/assets/uom_logo.ans" ]; then
+    if [ -w "/usr/local/share" ]; then
+        mkdir -p "/usr/local/share/uninet"
+        cp "$SCRIPT_DIR/assets/uom_logo.ans" "/usr/local/share/uninet/uom_logo.ans" 2>/dev/null || true
+    elif command -v sudo &>/dev/null; then
+        sudo mkdir -p "/usr/local/share/uninet" 2>/dev/null || true
+        sudo cp "$SCRIPT_DIR/assets/uom_logo.ans" "/usr/local/share/uninet/uom_logo.ans" 2>/dev/null || true
+    fi
+fi
+
 # 5. Install Background Auto-Connect Hook
 if [ "$PLATFORM" = "linux" ]; then
     if [ -d "/etc/NetworkManager/dispatcher.d" ]; then
