@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-linux:
+    name: Lint & Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Make Scripts Executable
+        run: chmod +x bin/uninet install.sh uninstall.sh tests/test_simulation.sh scripts/linux/99-uninet.sh
+
+      - name: Run Lint and Simulation Tests
+        run: make test
+
+  test-macos:
+    name: Lint & Syntax Check (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate macOS Scripts
+        run: |
+          chmod +x bin/uninet-macos install.sh uninstall.sh
+          bash -n bin/uninet-macos
+          bash -n install.sh
+          bash -n uninstall.sh
+
+  test-windows:
+    name: PowerShell Syntax Check (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate PowerShell Scripts
+        shell: pwsh
+        run: |
+          $scripts = @("bin/uninet.ps1", "scripts/windows/install.ps1", "scripts/windows/uninstall.ps1")
+          foreach ($s in $scripts) {
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($s, [ref]$null, [ref]$errors)
+              if ($errors.Count -gt 0) {
+                  Write-Error "Syntax error in $s: $errors"
+                  exit 1
+              }
+              Write-Host "✔ $s passed syntax validation"
+          }
