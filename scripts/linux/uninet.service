@@ -1,0 +1,15 @@
+[Unit]
+Description=UniNet University Wi-Fi Captive Portal Authenticator
+Documentation=https://github.com/dineTH2003-dev/uninet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/uninet login --quiet
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=45
+
+[Install]
+WantedBy=default.target
