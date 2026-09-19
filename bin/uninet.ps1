@@ -21,7 +21,7 @@ $Version = "1.0.0"
 $ConfigDir = "$env:APPDATA\uninet"
 $CredsFile = "$ConfigDir\credentials.json"
 $ProbeUrl = "http://connectivitycheck.gstatic.com/generate_204"
-$MatchPatterns = @("uom_wireless", "uom.wireless", "uom-wireless", "uom", "wireless", "campus", "eduroam")
+$MatchPatterns = @("uom_wireless", "uom.wireless", "uom-wireless", "uom", "wireless", "campus")
 
 function Write-UniLog([string]$Message, [string]$Color = "Cyan") {
     if (-not $Quiet) {

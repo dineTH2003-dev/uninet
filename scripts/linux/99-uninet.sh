@@ -17,7 +17,7 @@ CURRENT_SSID="$(nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | grep '^yes:' | cu
 
 # Match against University SSID patterns (case-insensitive)
 case "${CURRENT_SSID,,}" in
-    *uom*|*wireless*|*campus*|*university*|*student*|*eduroam*)
+    *uom*|*wireless*|*campus*|*university*|*student*)
         ;; # University network matched, proceed
     *)
         exit 0 # Non-university network, exit in 2ms without touching Python!

@@ -20,7 +20,7 @@ COOKIE_JAR="/tmp/uninet_cookies_$UID.txt"
 PROBE_URL="http://connectivitycheck.gstatic.com/generate_204"
 
 # University SSIDs to match
-MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless" "uom" "wireless" "campus" "eduroam")
+MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless" "uom" "wireless" "campus")
 
 # Terminal colors (disabled if not in terminal)
 if [ -t 1 ]; then
