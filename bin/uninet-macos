@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# UniNet - macOS University Wi-Fi Auto-Connect Engine
+#
+# Supported Networks:
+#   - UoM_Wireless
+#   - UoM.Wireless
+#   - UoM-Wireless
+#
+# Zero dependencies. Native macOS bash/zsh + curl + networksetup.
+# ==============================================================================
+
+set -eo pipefail
+
+VERSION="1.0.0"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
+USER_CREDS="$CONFIG_DIR/credentials.json"
+COOKIE_JAR="/tmp/uninet_cookies_$UID.txt"
+PROBE_URL="http://connectivitycheck.gstatic.com/generate_204"
+
+MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless" "uom" "wireless" "campus" "eduroam")
+
+# Terminal colors
+if [ -t 1 ]; then
+    BOLD="\033[1m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    CYAN="\033[36m"
+    RED="\033[31m"
+    RESET="\033[0m"
+else
+    BOLD=""
+    GREEN=""
+    YELLOW=""
+    CYAN=""
+    RED=""
+    RESET=""
+fi
+
+log() {
+    echo -e "${CYAN}[UniNet]${RESET} $*"
+}
+
+# 1. Get primary Wi-Fi interface (usually en0 on MacBooks)
+get_wifi_interface() {
+    networksetup -listallhardwareports 2>/dev/null | awk '/Wi-Fi|AirPort/{getline; print $2}' | head -n 1 || echo "en0"
+}
+
+# 2. Get active Wi-Fi SSID on macOS
+get_active_ssid() {
+    local iface
+    iface="$(get_wifi_interface)"
+    networksetup -getairportnetwork "$iface" 2>/dev/null | awk -F': ' '{print $2}' || true
+}
+
+# 3. Check if SSID matches university patterns
+is_university_network() {
+    local ssid="$1"
+    local ssid_lower="${ssid,,}"
+    for pat in "${MATCH_PATTERNS[@]}"; do
+        if [[ "$ssid_lower" == *"$pat"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 4. Check if internet is already reachable (HTTP 204)
+is_online() {
+    local code
+    code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 4 "$PROBE_URL" || true)"
+    [ "$code" = "204" ]
+}
+
+# 5. Read credentials from config file
+get_credentials() {
+    if [ ! -f "$USER_CREDS" ]; then
+        return 1
+    fi
+
+    USERNAME="$(grep -o '"username"[[:space:]]*:[[:space:]]*"[^"]*"' "$USER_CREDS" | head -n 1 | cut -d'"' -f4)"
+    PASSWORD="$(grep -o '"password"[[:space:]]*:[[:space:]]*"[^"]*"' "$USER_CREDS" | head -n 1 | cut -d'"' -f4)"
+
+    [ -n "$USERNAME" ] && [ -n "$PASSWORD" ]
+}
+
+# 6. Core Login Flow
+cmd_login() {
+    local quiet=0
+    if [ "$1" = "--quiet" ] || [ "$1" = "-q" ]; then
+        quiet=1
+    fi
+
+    local ssid
+    ssid="$(get_active_ssid)"
+
+    if [ -z "$ssid" ] || [ "$ssid" = "You are not associated with an AirPort network." ]; then
+        [ $quiet -eq 0 ] && log "Not connected to any Wi-Fi network."
+        exit 0
+    fi
+
+    # 2ms exit if not university network
+    if ! is_university_network "$ssid"; then
+        [ $quiet -eq 0 ] && log "Connected to non-university Wi-Fi ($ssid). Exiting."
+        exit 0
+    fi
+
+    # Check if already online
+    if is_online; then
+        [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
+        exit 0
+    fi
+
+    [ $quiet -eq 0 ] && log "Captive portal detected on ${BOLD}$ssid${RESET}. Authenticating..."
+
+    if ! get_credentials; then
+        log "${RED}Error: No saved credentials found in $USER_CREDS. Run 'uninet setup' first.${RESET}"
+        exit 1
+    fi
+
+    # Probe portal for redirect URL and session cookies
+    rm -f "$COOKIE_JAR"
+    local probe_output
+    probe_output="$(curl -s -i -c "$COOKIE_JAR" -L --max-redirs 5 --connect-timeout 8 "$PROBE_URL" 2>/dev/null || true)"
+    
+    local final_url
+    final_url="$(echo "$probe_output" | grep -i '^Location:' | tail -n 1 | awk '{print $2}' | tr -d '\r\n')"
+
+    local action_url
+    action_url="$(echo "$probe_output" | grep -i -o '<form[^>]*action=["'\''"][^"'\'']*["'\'']' | head -n 1 | sed -E 's/.*action=["'\''"]([^"'\'']*)["'\''"].*/\1/')"
+
+    if [ -z "$action_url" ] && [ -n "$final_url" ]; then
+        action_url="$final_url"
+    fi
+
+    if [ -z "$action_url" ]; then
+        action_url="${final_url:-$PROBE_URL}"
+    fi
+
+    [ $quiet -eq 0 ] && log "Submitting credentials for ${BOLD}$USERNAME${RESET}..."
+
+    # Submit login POST request
+    curl -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+        -X POST \
+        --data-urlencode "username=$USERNAME" \
+        --data-urlencode "password=$PASSWORD" \
+        --data-urlencode "user=$USERNAME" \
+        --data-urlencode "pass=$PASSWORD" \
+        --data-urlencode "student_id=$USERNAME" \
+        --data-urlencode "student_password=$PASSWORD" \
+        --max-time 10 \
+        "$action_url" > /dev/null 2>&1 || true
+
+    rm -f "$COOKIE_JAR"
+
+    # Verify connection
+    sleep 1
+    if is_online; then
+        [ $quiet -eq 0 ] && log "${GREEN}✔ Successfully connected! Internet is now active on $ssid.${RESET}"
+        exit 0
+    else
+        [ $quiet -eq 0 ] && log "${YELLOW}Notice: Credentials submitted. Checking connection...${RESET}"
+        exit 0
+    fi
+}
+
+# 7. Status Check
+cmd_status() {
+    local ssid
+    ssid="$(get_active_ssid)"
+    echo -e "${BOLD}${CYAN}=== UniNet macOS Status ===${RESET}"
+    echo -e "${BOLD}Active Wi-Fi:${RESET}   ${ssid:-None}"
+
+    if [ -n "$ssid" ]; then
+        if is_university_network "$ssid"; then
+            echo -e "${BOLD}University Net:${RESET} ${GREEN}Yes ($ssid)${RESET}"
+        else
+            echo -e "${BOLD}University Net:${RESET} ${YELLOW}No (Home/Other)${RESET}"
+        fi
+    fi
+
+    if is_online; then
+        echo -e "${BOLD}Internet:${RESET}       ${GREEN}ONLINE (Direct Internet Access confirmed)${RESET}"
+    else
+        echo -e "${BOLD}Internet:${RESET}       ${YELLOW}CAPTIVE PORTAL / OFFLINE${RESET}"
+    fi
+}
+
+# 8. Interactive Setup
+cmd_setup() {
+    echo -e "${BOLD}${CYAN}================================================${RESET}"
+    echo -e "${BOLD}${CYAN}         UniNet macOS Fast Setup Wizard         ${RESET}"
+    echo -e "${BOLD}${CYAN}================================================${RESET}\n"
+
+    local current_ssid
+    current_ssid="$(get_active_ssid)"
+    current_ssid="${current_ssid:-UoM_Wireless}"
+
+    echo -e "Detected Wi-Fi: ${BOLD}$current_ssid${RESET}\n"
+
+    read -rp "Student Username / ID: " user_in
+    if [ -z "$user_in" ]; then
+        echo -e "${RED}Error: Username cannot be empty.${RESET}"
+        exit 1
+    fi
+
+    read -rsp "Password: " pass_in
+    echo ""
+    if [ -z "$pass_in" ]; then
+        echo -e "${RED}Error: Password cannot be empty.${RESET}"
+        exit 1
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+    cat << EOF > "$USER_CREDS"
+{
+  "username": "$user_in",
+  "password": "$pass_in"
+}
+EOF
+    chmod 600 "$USER_CREDS"
+    echo -e "\n${GREEN}✔ Credentials saved locally in $USER_CREDS (mode 0600).${RESET}"
+
+    echo -e "\n${BOLD}Testing connection now...${RESET}"
+    cmd_login
+}
+
+# 9. CLI Route
+case "$1" in
+    login)
+        shift
+        cmd_login "$@"
+        ;;
+    status)
+        cmd_status
+        ;;
+    setup)
+        cmd_setup
+        ;;
+    uninstall)
+        rm -rf "$CONFIG_DIR"
+        echo "Removed configuration."
+        ;;
+    --version|-v)
+        echo "UniNet macOS v$VERSION"
+        ;;
+    --help|-h|*)
+        echo -e "${BOLD}UniNet macOS v$VERSION${RESET} - University Wi-Fi Auto-Connect"
+        echo ""
+        echo "Usage: uninet <command>"
+        echo ""
+        echo "Commands:"
+        echo "  login        Authenticate with university Wi-Fi portal"
+        echo "  status       Check current Wi-Fi and internet status"
+        echo "  setup        Configure student ID and password"
+        echo "  uninstall    Remove credentials and configuration"
+        echo ""
+        ;;
+esac
