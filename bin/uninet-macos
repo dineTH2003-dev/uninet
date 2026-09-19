@@ -198,14 +198,26 @@ cmd_setup() {
 
     echo -e "Detected Wi-Fi: ${BOLD}$current_ssid${RESET}\n"
 
-    read -rp "Student Username / ID: " user_in
+    local user_in=""
+    local pass_in=""
+
+    if [ -e /dev/tty ]; then
+        exec 3</dev/tty
+        read -u 3 -rp "Student Username / ID: " user_in
+        read -u 3 -rsp "Password: " pass_in
+        echo ""
+        exec 3<&-
+    else
+        read -rp "Student Username / ID: " user_in
+        read -rsp "Password: " pass_in
+        echo ""
+    fi
+
     if [ -z "$user_in" ]; then
         echo -e "${RED}Error: Username cannot be empty.${RESET}"
         exit 1
     fi
 
-    read -rsp "Password: " pass_in
-    echo ""
     if [ -z "$pass_in" ]; then
         echo -e "${RED}Error: Password cannot be empty.${RESET}"
         exit 1
@@ -225,11 +237,215 @@ EOF
     cmd_login
 }
 
-# 9. CLI Route
+# 8. Wi-Fi Multi-Factor Quality Scoring & Network Scanning
+calculate_ap_score() {
+    local sig="$1" is_5ghz="$2" rate="$3" active="$4"
+    local sig_score=$((sig * 35 / 10))
+
+    local band_bonus=0
+    if [ "$is_5ghz" -eq 1 ] && [ "$sig" -ge 20 ]; then
+        band_bonus=300
+    fi
+
+    [ "$rate" -gt 866 ] && rate=866
+    local rate_score=$((rate * 350 / 866))
+
+    local act_bonus=0
+    [ "$active" -eq 1 ] && act_bonus=120
+
+    echo $((sig_score + band_bonus + rate_score + act_bonus))
+}
+
+scan_networks_macos() {
+    local filter_mode="${1:-campus}"
+    local airport_cmd="/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+    if [ ! -x "$airport_cmd" ]; then
+        return
+    fi
+
+    local current_ssid
+    current_ssid="$(get_active_ssid)"
+
+    local output
+    output="$("$airport_cmd" -s 2>/dev/null | tail -n +2 || true)"
+    [ -z "$output" ] && return
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        if [[ "$line" =~ ([0-9a-fA-F]{1,2}(:[0-9a-fA-F]{1,2}){5}) ]]; then
+            local bssid="${BASH_REMATCH[1]}"
+            local before="${line%%"$bssid"*}"
+            local after="${line#*"$bssid"}"
+
+            local ssid
+            ssid="$(echo "$before" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ -z "$ssid" ] && continue
+
+            local include=0
+            if [ "$filter_mode" = "all" ]; then
+                include=1
+            elif is_university_network "$ssid"; then
+                include=1
+            fi
+
+            if [ "$include" -eq 1 ]; then
+                local rssi channel
+                read -r rssi channel _ <<< "$after"
+                rssi="${rssi//[^0-9-]/}"
+                channel="${channel%%,*}"
+                channel="${channel//[^0-9]/}"
+
+                rssi="${rssi:--80}"
+                channel="${channel:-1}"
+
+                local sig=$(( (rssi + 100) * 2 ))
+                [ "$sig" -lt 0 ] && sig=0
+                [ "$sig" -gt 100 ] && sig=100
+
+                local is_5ghz=0
+                local band_label="2.4 GHz"
+                local rate=130
+                if [ "$channel" -ge 36 ]; then
+                    is_5ghz=1
+                    band_label="5.0 GHz"
+                    rate=866
+                fi
+
+                local is_active=0
+                [ "$ssid" = "$current_ssid" ] && is_active=1
+
+                local score
+                score="$(calculate_ap_score "$sig" "$is_5ghz" "$rate" "$is_active")"
+
+                printf "%05d\t%d\t%s\t%s\t%s\t%s Mbit/s\t%s\n" \
+                    "$score" "$is_active" "$ssid" "$bssid" "$band_label" "$rate" "$sig"
+            fi
+        fi
+    done <<< "$output"
+}
+
+# 9. Scan & Optimize Commands
+cmd_scan() {
+    log "Scanning for available Wi-Fi networks..."
+    local results
+    results="$(scan_networks_macos "campus")"
+
+    if [ -z "$results" ]; then
+        echo -e "${YELLOW}Notice: No university campus networks detected in range.${RESET}"
+        echo -e "Showing nearby Wi-Fi networks for diagnosis:\n"
+        results="$(scan_networks_macos "all")"
+    else
+        echo -e "\n${BOLD}Detected Campus Networks:${RESET}"
+    fi
+
+    if [ -z "$results" ]; then
+        echo "No Wi-Fi networks found."
+        return
+    fi
+
+    local sorted
+    sorted="$(echo "$results" | sort -t$'\t' -k1,1nr)"
+
+    local active_score=0
+    while IFS=$'\t' read -r sc act ss bs bnd rt sig; do
+        if [ "$act" -eq 1 ]; then
+            active_score=$sc
+            break
+        fi
+    done <<< "$sorted"
+
+    printf "${BOLD}%-9s %-18s %-18s %-9s %-12s %-8s %-6s${RESET}\n" \
+        "STATUS" "SSID" "BSSID" "BAND" "RATE" "SIGNAL" "SCORE"
+    echo "----------------------------------------------------------------------------------"
+
+    while IFS=$'\t' read -r sc act ss bs bnd rt sig; do
+        local display_score
+        display_score="$(awk -v s="$sc" 'BEGIN { printf "%.1f", s / 10 }')"
+
+        local status="      "
+        local suffix=""
+        if [ "$act" -eq 1 ]; then
+            status="* ACTIVE"
+        elif [ "$active_score" -gt 0 ] && [ "$sc" -ge "$((active_score + 150))" ]; then
+            status="  BETTER"
+            suffix=" 🚀"
+        fi
+
+        printf "%-9s %-18s %-18s %-9s %-12s %-8s %-6s%s\n" \
+            "$status" "${ss:0:18}" "$bs" "$bnd" "$rt" "${sig}%" "$display_score" "$suffix"
+    done <<< "$sorted"
+    echo ""
+}
+
+cmd_optimize() {
+    log "Evaluating campus Wi-Fi networks for optimal bandwidth and speed..."
+    local results
+    results="$(scan_networks_macos "campus")"
+
+    if [ -z "$results" ]; then
+        log "No university networks detected in range. Checking standard login..."
+        cmd_login "$@"
+        return
+    fi
+
+    local sorted
+    sorted="$(echo "$results" | sort -t$'\t' -k1,1nr)"
+
+    local active_score=0 active_ssid=""
+    local top_score=0 top_ssid="" top_bssid="" top_band="" top_rate="" top_is_active=0
+
+    local first_line
+    first_line="$(echo "$sorted" | head -n 1)"
+    IFS=$'\t' read -r top_score top_is_active top_ssid top_bssid top_band top_rate _ <<< "$first_line"
+
+    while IFS=$'\t' read -r sc act ss bs bnd rt sig; do
+        if [ "$act" -eq 1 ]; then
+            active_score=$sc
+            active_ssid=$ss
+            break
+        fi
+    done <<< "$sorted"
+
+    local threshold=$((active_score + 150))
+
+    if [ "$top_is_active" -eq 1 ] || [ "$top_ssid" = "$active_ssid" ]; then
+        local display_active
+        display_active="$(awk -v s="$active_score" 'BEGIN { printf "%.1f", s / 10 }')"
+        log "Current connection '$active_ssid' is already the best available (Quality Score: $display_active)."
+    elif [ "$top_score" -ge "$threshold" ]; then
+        local diff=$((top_score - active_score))
+        local display_diff
+        display_diff="$(awk -v d="$diff" 'BEGIN { printf "%.1f", d / 10 }')"
+        log "${BOLD}Found significantly faster connection: '$top_ssid' (+$display_diff pts higher quality, $top_band, $top_rate).${RESET}"
+        log "Switching connection to '$top_ssid'..."
+        local iface
+        iface="$(get_wifi_interface)"
+        if networksetup -setairportnetwork "$iface" "$top_ssid" 2>&1; then
+            echo -e "${GREEN}✔ Successfully connected to $top_ssid!${RESET}"
+            sleep 2
+        else
+            echo -e "${YELLOW}Warning: Connection switch failed. Falling back to active network.${RESET}"
+        fi
+    else
+        log "Current connection '$active_ssid' is optimal (candidate difference is within the 15-point stability margin)."
+    fi
+
+    log "Probing captive portal..."
+    cmd_login "$@"
+}
+
+# 10. CLI Route
 case "$1" in
     login)
         shift
         cmd_login "$@"
+        ;;
+    optimize|best)
+        shift
+        cmd_optimize "$@"
+        ;;
+    scan)
+        cmd_scan
         ;;
     status)
         cmd_status
@@ -251,6 +467,8 @@ case "$1" in
         echo ""
         echo "Commands:"
         echo "  login        Authenticate with university Wi-Fi portal"
+        echo "  optimize     Find and switch to highest speed/bandwidth campus AP"
+        echo "  scan         List nearby campus Wi-Fi networks with quality scores"
         echo "  status       Check current Wi-Fi and internet status"
         echo "  setup        Configure student ID and password"
         echo "  uninstall    Remove credentials and configuration"
