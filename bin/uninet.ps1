@@ -17,7 +17,7 @@ param (
     [switch]$Quiet
 )
 
-$Version = "1.0.2"
+$Version = "1.0.3"
 $ConfigDir = "$env:APPDATA\uninet"
 $CredsFile = "$ConfigDir\credentials.json"
 $ProbeUrl = "http://connectivitycheck.gstatic.com/generate_204"

@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
 USER_CREDS="$CONFIG_DIR/credentials.json"
 SYSTEM_CREDS="/etc/uninet/credentials.json"
@@ -397,7 +397,7 @@ scan_networks() {
                         local score
                         score="$(calculate_ap_score "$sig_num" "$freq_num" "$rate_num" "$is_active")"
 
-                        printf "%05d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+                        printf "%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n" \
                             "$score" "$is_active" "$ssid" "$bssid" "$band_label" "$rate" "$signal" "$freq_num"
                     fi
                 fi
@@ -426,7 +426,7 @@ cmd_scan() {
         return
     fi
 
-    # Sort results by score descending
+    # Sort results by score descending (numeric sort)
     local sorted
     sorted="$(echo "$results" | sort -t$'\t' -k1,1nr)"
 
@@ -434,7 +434,7 @@ cmd_scan() {
     local active_score=0
     while IFS=$'\t' read -r sc act ss bs bnd rt sig fq; do
         if [ "$act" -eq 1 ]; then
-            active_score=$sc
+            active_score=$(( 10#${sc:-0} ))
             break
         fi
     done <<< "$sorted"
@@ -444,14 +444,15 @@ cmd_scan() {
     echo "----------------------------------------------------------------------------------"
 
     while IFS=$'\t' read -r sc act ss bs bnd rt sig fq; do
+        local sc_num=$(( 10#${sc:-0} ))
         local display_score
-        display_score="$(awk -v s="$sc" 'BEGIN { printf "%.1f", s / 10 }')"
+        display_score="$(awk -v s="$sc_num" 'BEGIN { printf "%.1f", s / 10 }')"
 
         local status="      "
         local suffix=""
         if [ "$act" -eq 1 ]; then
             status="* ACTIVE"
-        elif [ "$active_score" -gt 0 ] && [ "$sc" -ge "$((active_score + 150))" ]; then
+        elif [ "$active_score" -gt 0 ] && [ "$sc_num" -ge "$((active_score + 150))" ]; then
             status="  BETTER"
             suffix=" 🚀"
         fi
@@ -483,11 +484,12 @@ cmd_optimize() {
     local first_line
     first_line="$(echo "$sorted" | head -n 1)"
     IFS=$'\t' read -r top_score top_is_active top_ssid top_bssid top_band top_rate _ _ <<< "$first_line"
+    top_score=$(( 10#${top_score:-0} ))
 
     # Find currently active AP
     while IFS=$'\t' read -r sc act ss bs bnd rt sig fq; do
         if [ "$act" -eq 1 ]; then
-            active_score=$sc
+            active_score=$(( 10#${sc:-0} ))
             active_ssid=$ss
             active_bssid=$bs
             break
