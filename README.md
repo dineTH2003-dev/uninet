@@ -84,7 +84,7 @@ Unlike tools that run heavy background loops, UniNet uses an **event-driven arch
 
 ## 🛠 Commands
 
-### Linux & macOS:
+### 🐧 Linux & 🍎 macOS:
 ```bash
 # Automatically find and switch to highest-speed / 5 GHz campus AP
 uninet optimize
@@ -98,6 +98,9 @@ uninet status
 # Reconfigure username or password
 uninet setup
 
+# Register UoM SSIDs for automatic Wi-Fi join (runs automatically during setup)
+uninet trust
+
 # Force manual login
 uninet login
 
@@ -105,7 +108,7 @@ uninet login
 uninet uninstall
 ```
 
-### Windows (PowerShell / Command Prompt):
+### 🪟 Windows (PowerShell / Command Prompt):
 ```powershell
 # Automatically find and switch to highest-speed / 5 GHz campus AP
 uninet optimize
@@ -118,6 +121,9 @@ uninet status
 
 # Reconfigure username or password
 uninet setup
+
+# Register UoM SSIDs for automatic Wi-Fi join (runs automatically during setup)
+uninet trust
 
 # Force manual login
 uninet login

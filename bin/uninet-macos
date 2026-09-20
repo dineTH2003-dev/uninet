@@ -509,7 +509,13 @@ case "$1" in
         ;;
     uninstall)
         rm -rf "$CONFIG_DIR"
-        echo "Removed configuration."
+        # Remove preferred wireless networks added by 'uninet trust'
+        local iface
+        iface="$(get_wifi_interface)"
+        for ssid in "UoM_Wireless" "UoM.Wireless" "UoM-Wireless"; do
+            networksetup -removepreferredwirelessnetwork "$iface" "$ssid" 2>/dev/null || true
+        done
+        echo -e "${GREEN}✔ UniNet has been completely uninstalled.${RESET}"
         ;;
     --version|-v)
         echo "UniNet macOS v$VERSION"

@@ -531,6 +531,14 @@ cmd_uninstall() {
         sudo rm -f /etc/NetworkManager/dispatcher.d/99-uninet.sh 2>/dev/null || true
         sudo rm -rf /etc/uninet 2>/dev/null || true
         sudo rm -f /usr/local/bin/uninet 2>/dev/null || true
+        sudo rm -rf /usr/local/share/uninet 2>/dev/null || true
+    fi
+
+    # Remove NetworkManager connection profiles registered by 'uninet trust'
+    if command -v nmcli &>/dev/null; then
+        for ssid in "UoM_Wireless" "UoM.Wireless" "UoM-Wireless"; do
+            nmcli connection delete "$ssid" 2>/dev/null || true
+        done
     fi
 
     echo -e "${GREEN}✔ UniNet has been completely uninstalled.${RESET}"
