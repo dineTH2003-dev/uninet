@@ -127,16 +127,45 @@ uninet trust
 
 # Force manual login
 uninet login
+
+# Completely remove UniNet
+uninet uninstall
 ```
+
+---
+
+## 🔑 Changing Credentials / Fixing a Typo
+
+If you entered your Student Username or Password incorrectly, or changed your campus password:
+```bash
+uninet setup
+```
+Run this on **Linux, macOS, or Windows** at any time. It will prompt for your updated credentials and securely overwrite the local configuration.
 
 ---
 
 ## 🗑 Uninstallation
 
-If you ever want to completely remove UniNet and all hooks:
+You can completely remove UniNet and all background hooks using either method:
 
-- **Linux & macOS**: `./uninstall.sh` (or `uninet uninstall`)
-- **Windows**: `powershell -ExecutionPolicy Bypass -File .\scripts\windows\uninstall.ps1`
+### Method 1: Global CLI Command (Recommended)
+Open your terminal (or PowerShell as Administrator on Windows) and run:
+```bash
+uninet uninstall
+```
+
+### Method 2: 1-Line Web Uninstaller
+If you already deleted files or prefer a clean web command:
+
+**🐧 Linux & 🍎 macOS**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/uninstall.sh | bash
+```
+
+**🪟 Windows (PowerShell as Administrator)**:
+```powershell
+irm https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/scripts/windows/uninstall.ps1 | iex
+```
 
 ---
 

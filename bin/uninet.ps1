@@ -17,7 +17,7 @@ param (
     [switch]$Quiet
 )
 
-$Version = "1.0.0"
+$Version = "1.0.1"
 $ConfigDir = "$env:APPDATA\uninet"
 $CredsFile = "$ConfigDir\credentials.json"
 $ProbeUrl = "http://connectivitycheck.gstatic.com/generate_204"
@@ -478,6 +478,46 @@ function Optimize-Connection {
     Invoke-UniLogin
 }
 
+function Invoke-UniUninstall {
+    Write-Host "Uninstalling UniNet for Windows..." -ForegroundColor Yellow
+
+    # Remove scheduled task
+    $TaskName = "UniNetAutoConnect"
+    $null = cmd.exe /c "schtasks /delete /tn `"$TaskName`" /f >nul 2>nul"
+
+    # Remove WLAN profiles registered by 'uninet setup' / 'uninet trust'
+    foreach ($ssid in @("UoM_Wireless", "UoM.Wireless", "UoM-Wireless")) {
+        $null = cmd.exe /c "netsh wlan delete profile name=`"$ssid`" >nul 2>nul"
+    }
+
+    # Remove user-scoped config directory
+    $UserDir = "$env:APPDATA\uninet"
+    if (Test-Path $UserDir) {
+        Remove-Item -Path $UserDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Remove from system PATH
+    $InstallDir = "C:\ProgramData\uninet"
+    $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if ($MachinePath -like "*$InstallDir*") {
+        $NewPath = ($MachinePath.Split(';') | Where-Object { $_ -ne $InstallDir }) -join ';'
+        try { [Environment]::SetEnvironmentVariable("Path", $NewPath, "Machine") } catch { }
+    }
+
+    # Remove from user PATH
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($UserPath -like "*$InstallDir*") {
+        $NewPath = ($UserPath.Split(';') | Where-Object { $_ -ne $InstallDir }) -join ';'
+        try { [Environment]::SetEnvironmentVariable("Path", $NewPath, "User") } catch { }
+    }
+
+    # Schedule deferred cleanup of install directory after script exits
+    $cleanupCmd = "ping 127.0.0.1 -n 2 >nul & rmdir /s /q `"$InstallDir`""
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/c $cleanupCmd" -WindowStyle Hidden
+
+    Write-Host "[+] UniNet has been completely removed from your Windows machine." -ForegroundColor Green
+}
+
 # 9. Command Router
 switch ($Command.ToLower()) {
     "login"      { Invoke-UniLogin }
@@ -487,9 +527,10 @@ switch ($Command.ToLower()) {
     "status"     { Show-UniStatus }
     "setup"      { Invoke-UniSetup }
     "trust"      { Add-TrustedNetworks }
+    "uninstall"  { Invoke-UniUninstall }
     "help"       {
         Write-Host "UniNet Windows v$Version"
-        Write-Host "Usage: .\uninet.ps1 [login | optimize | scan | status | setup | trust]"
+        Write-Host "Usage: .\uninet.ps1 [login | optimize | scan | status | setup | trust | uninstall]"
     }
     default      { Invoke-UniLogin }
 }
