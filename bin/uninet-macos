@@ -539,8 +539,9 @@ cmd_update() {
     chmod +x "$temp_bin"
 
     local updated=0
-    if [ -f "$HOME/.local/bin/uninet" ] || [ -w "$HOME/.local/bin" ]; then
+    if [ -f "$HOME/.local/bin/uninet" ] || [ -L "$HOME/.local/bin/uninet" ] || [ -w "$HOME/.local/bin" ]; then
         mkdir -p "$HOME/.local/bin"
+        rm -f "$HOME/.local/bin/uninet"
         cp "$temp_bin" "$HOME/.local/bin/uninet"
         chmod 755 "$HOME/.local/bin/uninet"
         updated=$((updated + 1))
@@ -548,11 +549,15 @@ cmd_update() {
 
     if [ -f "/usr/local/bin/uninet" ] || [ -w "/usr/local/bin" ]; then
         if [ -w "/usr/local/bin" ]; then
+            rm -f "/usr/local/bin/uninet"
             cp "$temp_bin" "/usr/local/bin/uninet"
             chmod 755 "/usr/local/bin/uninet"
             updated=$((updated + 1))
         elif command -v sudo &>/dev/null; then
-            sudo cp "$temp_bin" "/usr/local/bin/uninet" 2>/dev/null && sudo chmod 755 "/usr/local/bin/uninet" 2>/dev/null && updated=$((updated + 1)) || true
+            if sudo cp "$temp_bin" "/usr/local/bin/uninet" 2>/dev/null; then
+                sudo chmod 755 "/usr/local/bin/uninet" 2>/dev/null || true
+                updated=$((updated + 1))
+            fi
         fi
     fi
 
