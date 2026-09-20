@@ -37,9 +37,32 @@ if ($LocalScript) {
     try {
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
     } catch { }
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("User-Agent", "UniNet-Installer")
-    $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $ScriptDest)
+
+    $ReleaseZipUrl = "https://github.com/dineTH2003-dev/uninet/releases/latest/download/uninet-windows.zip"
+    $TempZip = Join-Path ([System.IO.Path]::GetTempPath()) "uninet-windows.zip"
+    $downloadSuccess = $false
+
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent", "UniNet-Installer")
+        $wc.DownloadFile($ReleaseZipUrl, $TempZip)
+        if ((Test-Path $TempZip) -and ((Get-Item $TempZip).Length -gt 1000)) {
+            # Extract flat archive directly to $InstallDir (increments GitHub release download counter)
+            Expand-Archive -Path $TempZip -DestinationPath $InstallDir -Force
+            $downloadSuccess = $true
+        }
+        Remove-Item -Path $TempZip -Force -ErrorAction SilentlyContinue
+    } catch { }
+
+    if (-not $downloadSuccess -or -not (Test-Path $ScriptDest)) {
+        # Fallback to raw repository script
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent", "UniNet-Installer")
+        $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $ScriptDest)
+        try {
+            $wc.DownloadFile("$RepoRawUrl/assets/uom_logo.ans", "$InstallDir\uom_logo.ans")
+        } catch { }
+    }
 }
 
 # Copy logo asset if available locally
@@ -123,11 +146,3 @@ Remove-Item $TempXml -Force -ErrorAction SilentlyContinue
 # 3. Launch interactive credentials setup in a dedicated PowerShell process
 & powershell.exe -ExecutionPolicy Bypass -NoProfile -File "$ScriptDest" setup
 
-# 4. Anonymous Install Telemetry Counter (Hits.sh - 100% Privacy Preserving)
-try {
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-    $wcPing = New-Object System.Net.WebClient
-    $wcPing.Headers.Add("User-Agent", "UniNet-Installer")
-    $null = $wcPing.DownloadStringAsync((New-Object System.Uri("https://hits.sh/github.com/dineTH2003-dev/uninet/installs.svg")))
-    $null = $wcPing.DownloadStringAsync((New-Object System.Uri("https://hits.sh/github.com/dineTH2003-dev/uninet/installs-windows.svg")))
-} catch { }

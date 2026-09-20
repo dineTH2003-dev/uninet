@@ -12,6 +12,7 @@
 set -eo pipefail
 
 REPO_RAW_URL="https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
+REPO_RELEASE_URL="https://github.com/dineTH2003-dev/uninet/releases/latest/download"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 
 BOLD="\033[1m"
@@ -94,10 +95,21 @@ if [ "$PLATFORM" = "linux" ]; then
         HOOK_SRC="$LOCAL_HOOK"
     else
         TEMP_DIR="$(mktemp -d)"
-        BIN_SRC="$TEMP_DIR/uninet"
-        HOOK_SRC="$TEMP_DIR/99-uninet.sh"
-        curl -fsSL "$REPO_RAW_URL/bin/uninet" -o "$BIN_SRC"
-        curl -fsSL "$REPO_RAW_URL/scripts/linux/99-uninet.sh" -o "$HOOK_SRC"
+        # Try downloading official release archive first (increments GitHub release download counter)
+        if curl -fsSL --connect-timeout 5 --max-time 15 "$REPO_RELEASE_URL/uninet-linux.tar.gz" -o "$TEMP_DIR/uninet-linux.tar.gz" 2>/dev/null && tar -xzf "$TEMP_DIR/uninet-linux.tar.gz" -C "$TEMP_DIR" 2>/dev/null; then
+            BIN_SRC="$TEMP_DIR/bin/uninet"
+            HOOK_SRC="$TEMP_DIR/scripts/linux/99-uninet.sh"
+            if [ -f "$TEMP_DIR/assets/uom_logo.ans" ]; then
+                mkdir -p "$HOME/.config/uninet"
+                cp "$TEMP_DIR/assets/uom_logo.ans" "$HOME/.config/uninet/uom_logo.ans" 2>/dev/null || true
+            fi
+        else
+            # Graceful fallback to raw repository files
+            BIN_SRC="$TEMP_DIR/uninet"
+            HOOK_SRC="$TEMP_DIR/99-uninet.sh"
+            curl -fsSL "$REPO_RAW_URL/bin/uninet" -o "$BIN_SRC"
+            curl -fsSL "$REPO_RAW_URL/scripts/linux/99-uninet.sh" -o "$HOOK_SRC"
+        fi
     fi
 
 elif [ "$PLATFORM" = "macos" ]; then
@@ -110,10 +122,21 @@ elif [ "$PLATFORM" = "macos" ]; then
         HOOK_SRC="$LOCAL_PLIST"
     else
         TEMP_DIR="$(mktemp -d)"
-        BIN_SRC="$TEMP_DIR/uninet-macos"
-        HOOK_SRC="$TEMP_DIR/com.uninet.autoconnect.plist"
-        curl -fsSL "$REPO_RAW_URL/bin/uninet-macos" -o "$BIN_SRC"
-        curl -fsSL "$REPO_RAW_URL/scripts/macos/com.uninet.autoconnect.plist" -o "$HOOK_SRC"
+        # Try downloading official release archive first (increments GitHub release download counter)
+        if curl -fsSL --connect-timeout 5 --max-time 15 "$REPO_RELEASE_URL/uninet-macos.tar.gz" -o "$TEMP_DIR/uninet-macos.tar.gz" 2>/dev/null && tar -xzf "$TEMP_DIR/uninet-macos.tar.gz" -C "$TEMP_DIR" 2>/dev/null; then
+            BIN_SRC="$TEMP_DIR/bin/uninet-macos"
+            HOOK_SRC="$TEMP_DIR/scripts/macos/com.uninet.autoconnect.plist"
+            if [ -f "$TEMP_DIR/assets/uom_logo.ans" ]; then
+                mkdir -p "$HOME/.config/uninet"
+                cp "$TEMP_DIR/assets/uom_logo.ans" "$HOME/.config/uninet/uom_logo.ans" 2>/dev/null || true
+            fi
+        else
+            # Graceful fallback to raw repository files
+            BIN_SRC="$TEMP_DIR/uninet-macos"
+            HOOK_SRC="$TEMP_DIR/com.uninet.autoconnect.plist"
+            curl -fsSL "$REPO_RAW_URL/bin/uninet-macos" -o "$BIN_SRC"
+            curl -fsSL "$REPO_RAW_URL/scripts/macos/com.uninet.autoconnect.plist" -o "$HOOK_SRC"
+        fi
     fi
 fi
 
@@ -164,13 +187,3 @@ fi
 
 # 6. Interactive Setup
 "$TARGET_BIN" setup
-
-# 7. Anonymous Install Telemetry Counter (Hits.sh - 100% Privacy Preserving)
-(
-    curl -fsSL --connect-timeout 2 --max-time 4 "https://hits.sh/github.com/dineTH2003-dev/uninet/installs.svg" >/dev/null 2>&1 || true
-    if [ "$PLATFORM" = "macos" ]; then
-        curl -fsSL --connect-timeout 2 --max-time 4 "https://hits.sh/github.com/dineTH2003-dev/uninet/installs-macos.svg" >/dev/null 2>&1 || true
-    else
-        curl -fsSL --connect-timeout 2 --max-time 4 "https://hits.sh/github.com/dineTH2003-dev/uninet/installs-linux.svg" >/dev/null 2>&1 || true
-    fi
-) >/dev/null 2>&1 &

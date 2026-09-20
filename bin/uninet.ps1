@@ -604,12 +604,28 @@ function Invoke-UniUpdate {
     $targetFile = "$installDir\uninet.ps1"
     $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "uninet_new.ps1")
 
+    $downloadSuccess = $false
+    $releaseAssetUrl = "https://github.com/dineTH2003-dev/uninet/releases/download/v$latest/uninet.ps1"
     try {
-        $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $tempFile)
-        if (-not (Test-Path $tempFile) -or (Get-Item $tempFile).Length -lt 500) {
-            Write-Host "Error: Downloaded file corrupted or invalid." -ForegroundColor Red
+        $wc.DownloadFile($releaseAssetUrl, $tempFile)
+        if ((Test-Path $tempFile) -and ((Get-Item $tempFile).Length -ge 500)) {
+            $downloadSuccess = $true
+        }
+    } catch { }
+
+    if (-not $downloadSuccess) {
+        try {
+            $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $tempFile)
+        } catch {
+            Write-Host "Error: Failed to download update from GitHub." -ForegroundColor Red
             return
         }
+    }
+
+    if (-not (Test-Path $tempFile) -or (Get-Item $tempFile).Length -lt 500) {
+        Write-Host "Error: Downloaded file corrupted or invalid." -ForegroundColor Red
+        return
+    }
 
         # Replace installed script
         Copy-Item -Path $tempFile -Destination $targetFile -Force

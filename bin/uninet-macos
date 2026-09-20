@@ -524,10 +524,13 @@ cmd_update() {
 
     local temp_bin
     temp_bin="$(mktemp)"
-    if ! curl -fsSL --connect-timeout 5 --max-time 15 "$REPO_RAW_URL/bin/uninet-macos" -o "$temp_bin"; then
-        rm -f "$temp_bin"
-        echo -e "${RED}Error: Failed to download update from GitHub.${RESET}"
-        return 1
+    # Try downloading release asset first (increments GitHub release download counter)
+    if ! curl -fsSL --connect-timeout 5 --max-time 15 "https://github.com/dineTH2003-dev/uninet/releases/download/v${latest_ver}/uninet-macos" -o "$temp_bin" 2>/dev/null || ! [ -s "$temp_bin" ]; then
+        if ! curl -fsSL --connect-timeout 5 --max-time 15 "$REPO_RAW_URL/bin/uninet-macos" -o "$temp_bin"; then
+            rm -f "$temp_bin"
+            echo -e "${RED}Error: Failed to download update from GitHub.${RESET}"
+            return 1
+        fi
     fi
 
     if ! head -n 1 "$temp_bin" | grep -q "bash"; then

@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platforms: Linux | macOS | Windows](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-orange.svg)]()
 [![Dependencies: 0](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)]()
-[![Installs](https://hits.sh/github.com/dineTH2003-dev/uninet/installs.svg?label=installs&color=007ec6)](https://hits.sh/github.com/dineTH2003-dev/uninet/)
+[![Downloads](https://img.shields.io/github/downloads/dineTH2003-dev/uninet/total.svg?color=007ec6&label=downloads)](https://github.com/dineTH2003-dev/uninet/releases)
 
 ---
 

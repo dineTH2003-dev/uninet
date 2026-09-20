@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build Release Packages
+        run: |
+          mkdir -p dist
+
+          # 1. Linux Archive & Standalone Binary
+          tar -czf dist/uninet-linux.tar.gz bin/uninet scripts/linux/99-uninet.sh assets/uom_logo.ans
+          cp bin/uninet dist/uninet
+
+          # 2. macOS Archive & Standalone Binary
+          tar -czf dist/uninet-macos.tar.gz bin/uninet-macos scripts/macos/com.uninet.autoconnect.plist assets/uom_logo.ans
+          cp bin/uninet-macos dist/uninet-macos
+
+          # 3. Windows Archive & Standalone Script
+          zip -j dist/uninet-windows.zip bin/uninet.ps1 scripts/windows/install.ps1 scripts/windows/uninstall.ps1 assets/uom_logo.ans
+          cp bin/uninet.ps1 dist/uninet.ps1
+
+          echo "Generated release assets:"
+          ls -lh dist/
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/uninet-linux.tar.gz
+            dist/uninet-macos.tar.gz
+            dist/uninet-windows.zip
+            dist/uninet
+            dist/uninet-macos
+            dist/uninet.ps1
+          generate_release_notes: true
