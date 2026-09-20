@@ -217,12 +217,12 @@ cmd_setup() {
 
     if [ -e /dev/tty ]; then
         exec 3</dev/tty
-        read -u 3 -rp "Student Username / ID : " user_in
+        read -u 3 -rp "Student Username      : " user_in
         read -u 3 -rsp "Network Password      : " pass_in
         echo ""
         exec 3<&-
     else
-        read -rp "Student Username / ID : " user_in
+        read -rp "Student Username      : " user_in
         read -rsp "Network Password      : " pass_in
         echo ""
     fi

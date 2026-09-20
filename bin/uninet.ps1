@@ -209,7 +209,7 @@ function Invoke-UniSetup {
         Write-Host "Active Wi-Fi: $ssid`n"
     }
 
-    $username = Read-Host "Student Username / ID "
+    $username = Read-Host "Student Username      "
     if ([string]::IsNullOrWhiteSpace($username)) {
         Write-Host "Error: Username cannot be empty." -ForegroundColor Red
         return
