@@ -143,19 +143,21 @@ fi
 chmod +x "$BIN_SRC"
 
 # 4. Install Executable Binary
+# Always install to user bin
+mkdir -p "$HOME/.local/bin"
+cp "$BIN_SRC" "$USER_BIN"
+chmod 755 "$USER_BIN"
+TARGET_BIN="$USER_BIN"
+
+# Also sync to global bin if writable or via sudo
 if [ -w "/usr/local/bin" ]; then
-    cp "$BIN_SRC" "$GLOBAL_BIN"
-    chmod 755 "$GLOBAL_BIN"
+    cp "$BIN_SRC" "$GLOBAL_BIN" 2>/dev/null || true
+    chmod 755 "$GLOBAL_BIN" 2>/dev/null || true
     TARGET_BIN="$GLOBAL_BIN"
 elif command -v sudo &>/dev/null; then
-    sudo cp "$BIN_SRC" "$GLOBAL_BIN"
-    sudo chmod 755 "$GLOBAL_BIN"
-    TARGET_BIN="$GLOBAL_BIN"
-else
-    mkdir -p "$HOME/.local/bin"
-    cp "$BIN_SRC" "$USER_BIN"
-    chmod 755 "$USER_BIN"
-    TARGET_BIN="$USER_BIN"
+    sudo cp "$BIN_SRC" "$GLOBAL_BIN" 2>/dev/null || true
+    sudo chmod 755 "$GLOBAL_BIN" 2>/dev/null || true
+    [ -x "$GLOBAL_BIN" ] && TARGET_BIN="$GLOBAL_BIN"
 fi
 
 # Optional: Install Logo Asset if available locally

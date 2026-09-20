@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-VERSION="1.0.5"
+VERSION="1.0.6"
 REPO_RAW_URL="https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
 USER_CREDS="$CONFIG_DIR/credentials.json"
@@ -73,6 +73,35 @@ is_online() {
     [ "$code" = "204" ]
 }
 
+# 5. Resolve relative or absolute URL against a base URL
+resolve_url() {
+    local base="$1"
+    local target="$2"
+
+    if [[ "$target" =~ ^https?:// ]]; then
+        echo "$target"
+        return
+    fi
+
+    local proto_host
+    proto_host="$(echo "$base" | grep -o -E '^https?://[^/?#]+')"
+
+    if [ -z "$proto_host" ]; then
+        echo "$target"
+        return
+    fi
+
+    if [[ "$target" =~ ^/ ]]; then
+        echo "${proto_host}${target}"
+    elif [ -z "$target" ]; then
+        echo "$base"
+    else
+        local base_dir
+        base_dir="$(echo "$base" | sed -E 's|\?.*$||; s|/[^/]*$||')"
+        echo "${base_dir}/${target}"
+    fi
+}
+
 # 5. Read credentials from config file
 get_credentials() {
     if [ ! -f "$USER_CREDS" ]; then
@@ -96,7 +125,17 @@ cmd_login() {
     ssid="$(get_active_ssid)"
 
     if [ -z "$ssid" ] || [ "$ssid" = "You are not associated with an AirPort network." ]; then
-        [ $quiet -eq 0 ] && log "Not connected to any Wi-Fi network."
+        if [ $quiet -eq 0 ]; then
+            log "Not connected to Wi-Fi. Scanning for campus networks..."
+            local campus_res
+            campus_res="$(scan_networks_macos "campus" 2>/dev/null || true)"
+            if [ -n "$campus_res" ]; then
+                cmd_optimize "$@"
+                return
+            else
+                log "No university Wi-Fi networks found in range."
+            fi
+        fi
         exit 0
     fi
 
@@ -119,36 +158,102 @@ cmd_login() {
         exit 1
     fi
 
-    # Probe portal for redirect URL and session cookies
+    # Probe portal for redirect URL, final destination, and session cookies
     rm -f "$COOKIE_JAR"
+    local probe_tmp
+    probe_tmp="$(mktemp)"
+    local effective_url
+    effective_url="$(curl -s -k -c "$COOKIE_JAR" -L --max-redirs 5 --connect-timeout 8 -w "%{url_effective}" "$PROBE_URL" -o "$probe_tmp" 2>/dev/null || true)"
     local probe_output
-    probe_output="$(curl -s -i -c "$COOKIE_JAR" -L --max-redirs 5 --connect-timeout 8 "$PROBE_URL" 2>/dev/null || true)"
-    
-    local final_url
-    final_url="$(echo "$probe_output" | grep -i '^Location:' | tail -n 1 | awk '{print $2}' | tr -d '\r\n')"
+    probe_output="$(cat "$probe_tmp" 2>/dev/null || true)"
+    rm -f "$probe_tmp"
 
-    local action_url
-    action_url="$(echo "$probe_output" | grep -i -o '<form[^>]*action=["'\''"][^"'\'']*["'\'']' | head -n 1 | sed -E 's/.*action=["'\''"]([^"'\'']*)["'\''"].*/\1/')"
+    local location_url
+    location_url="$(echo "$probe_output" | grep -i '^Location:' | tail -n 1 | awk '{print $2}' | tr -d '\r\n')"
 
-    if [ -z "$action_url" ] && [ -n "$final_url" ]; then
-        action_url="$final_url"
+    local portal_base_url="${effective_url:-$location_url}"
+    portal_base_url="${portal_base_url:-$PROBE_URL}"
+
+    # Handle HTML meta-refresh or javascript redirect if present
+    local meta_url
+    meta_url="$(echo "$probe_output" | grep -i -o '<meta[^>]*http-equiv=["'\''"]refresh["'\''"][^>]*' | grep -i -o 'url=[^"'\'' >]*' | head -n 1 | cut -d'=' -f2- | tr -d '"'\'' || true)"
+    if [ -n "$meta_url" ]; then
+        local resolved_meta
+        resolved_meta="$(resolve_url "$portal_base_url" "$meta_url")"
+        if [ -n "$resolved_meta" ] && [ "$resolved_meta" != "$portal_base_url" ]; then
+            portal_base_url="$resolved_meta"
+            probe_tmp="$(mktemp)"
+            effective_url="$(curl -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" -L --max-redirs 5 --connect-timeout 8 -w "%{url_effective}" "$portal_base_url" -o "$probe_tmp" 2>/dev/null || true)"
+            probe_output="$(cat "$probe_tmp" 2>/dev/null || true)"
+            rm -f "$probe_tmp"
+            portal_base_url="${effective_url:-$portal_base_url}"
+        fi
     fi
 
+    # Extract form action URL and resolve against portal base URL
+    local raw_action
+    raw_action="$(echo "$probe_output" | grep -i -o '<form[^>]*action=["'\''"][^"'\'']*["'\'']' | head -n 1 | sed -E 's/.*action=["'\''"]([^"'\'']*)["'\''"].*/\1/' || true)"
+
+    local action_url
+    action_url="$(resolve_url "$portal_base_url" "$raw_action")"
     if [ -z "$action_url" ]; then
-        action_url="${final_url:-$PROBE_URL}"
+        action_url="$portal_base_url"
     fi
 
     [ $quiet -eq 0 ] && log "Submitting credentials for ${BOLD}$USERNAME${RESET}..."
 
-    # Submit login POST request
+    # Build intelligent, multi-vendor payload
+    local curl_data=()
+
+    # 1. Extract hidden form fields (CSRF tokens, session IDs, gateway params)
+    while IFS='=' read -r h_name h_val; do
+        if [ -n "$h_name" ]; then
+            curl_data+=(--data-urlencode "$h_name=$h_val")
+        fi
+    done < <(echo "$probe_output" | grep -i -o '<input[^>]*>' | while read -r tag; do
+        if echo "$tag" | grep -iq 'type=["'\''"]\?hidden'; then
+            local n v
+            n="$(echo "$tag" | sed -E -n 's/.*name=["'\''"]([^"'\''>[:space:]]+)["'\''"].*/\1/p')"
+            v="$(echo "$tag" | sed -E -n 's/.*value=["'\''"]([^"'\''>]*).*/\1/p')"
+            [ -n "$n" ] && echo "$n=$v"
+        fi
+    done)
+
+    # 2. Inject username based on detected form field names
+    if echo "$probe_output" | grep -iq 'name=["'\''"]user["'\''"]'; then
+        curl_data+=(--data-urlencode "user=$USERNAME")
+    fi
+    if echo "$probe_output" | grep -iq 'name=["'\''"]username["'\''"]'; then
+        curl_data+=(--data-urlencode "username=$USERNAME")
+    fi
+    if ! echo "$probe_output" | grep -iq 'name=["'\''"]\(user\|username\)["'\''"]'; then
+        curl_data+=(--data-urlencode "username=$USERNAME" --data-urlencode "user=$USERNAME")
+    fi
+
+    # 3. Inject password based on detected form field names
+    if echo "$probe_output" | grep -iq 'name=["'\''"]password["'\''"]'; then
+        curl_data+=(--data-urlencode "password=$PASSWORD")
+    elif echo "$probe_output" | grep -iq 'name=["'\''"]pass["'\''"]'; then
+        curl_data+=(--data-urlencode "pass=$PASSWORD")
+    else
+        curl_data+=(--data-urlencode "password=$PASSWORD")
+    fi
+
+    # 4. Aruba Networks specific requirements (uom.wireless)
+    if [[ "$action_url" == *"cgi-bin/login"* ]] || [[ "${ssid,,}" == *"uom.wireless"* ]]; then
+        if ! [[ "${curl_data[*]}" == *"cmd="* ]]; then
+            curl_data+=(--data-urlencode "cmd=authenticate")
+        fi
+        if ! [[ "${curl_data[*]}" == *"user="* ]]; then
+            curl_data+=(--data-urlencode "user=$USERNAME")
+        fi
+        curl_data+=(--data-urlencode "Login=Log In")
+    fi
+
+    # 5. Submit authentication request
     curl -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
         -X POST \
-        --data-urlencode "username=$USERNAME" \
-        --data-urlencode "password=$PASSWORD" \
-        --data-urlencode "user=$USERNAME" \
-        --data-urlencode "pass=$PASSWORD" \
-        --data-urlencode "student_id=$USERNAME" \
-        --data-urlencode "student_password=$PASSWORD" \
+        "${curl_data[@]}" \
         --max-time 10 \
         "$action_url" > /dev/null 2>&1 || true
 
@@ -160,6 +265,12 @@ cmd_login() {
         [ $quiet -eq 0 ] && log "${GREEN}✔ Successfully connected! Internet is now active on $ssid.${RESET}"
         exit 0
     else
+        # Allow a 2-second gateway settling grace period
+        sleep 2
+        if is_online; then
+            [ $quiet -eq 0 ] && log "${GREEN}✔ Successfully connected! Internet is now active on $ssid.${RESET}"
+            exit 0
+        fi
         [ $quiet -eq 0 ] && log "${YELLOW}Notice: Credentials submitted. Checking connection...${RESET}"
         exit 0
     fi
@@ -478,7 +589,17 @@ cmd_optimize() {
 
     local threshold=$((active_score + 150))
 
-    if [ "$top_is_active" -eq 1 ] || [ "$top_ssid" = "$active_ssid" ]; then
+    if [ "$active_score" -eq 0 ]; then
+        log "Connecting to campus Wi-Fi '$top_ssid' ($top_band, $top_rate)..."
+        local iface
+        iface="$(get_wifi_interface)"
+        if networksetup -setairportnetwork "$iface" "$top_ssid" 2>&1; then
+            echo -e "${GREEN}✔ Successfully connected to $top_ssid!${RESET}"
+            sleep 1
+        else
+            echo -e "${YELLOW}Warning: Connection attempt to $top_ssid failed.${RESET}"
+        fi
+    elif [ "$top_is_active" -eq 1 ] || [ "$top_ssid" = "$active_ssid" ]; then
         local display_active
         display_active="$(awk -v s="$active_score" 'BEGIN { printf "%.1f", s / 10 }')"
         log "Current connection '$active_ssid' is already the best available (Quality Score: $display_active)."
@@ -610,6 +731,9 @@ case "$1" in
         ;;
     --version|-v)
         echo "UniNet macOS v$VERSION"
+        ;;
+    "")
+        cmd_login
         ;;
     --help|-h|*)
         echo -e "${BOLD}UniNet macOS v$VERSION${RESET} - University Wi-Fi Auto-Connect"

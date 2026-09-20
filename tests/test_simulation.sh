@@ -66,8 +66,14 @@ ACTION=$(echo "$HTML" | grep -i -o '<form[^>]*action="[^"]*"' | head -n 1 | sed 
 echo "  -> Extracted Form Action: $ACTION"
 [ "$ACTION" = "/login_submit" ]
 
+# Validate resolve_url properly resolves relative action to full absolute URL
+eval "$(sed -n '/resolve_url() {/,/^}/p' bin/uninet)"
+RESOLVED_ACTION=$(resolve_url "$REDIRECT_URL" "$ACTION")
+echo "  -> Resolved Full URL: $RESOLVED_ACTION"
+[ "$RESOLVED_ACTION" = "http://127.0.0.1:$PORT/login_submit" ]
+
 echo "[Test 3] Submit simulated student credentials:"
-curl -s -X POST --data-urlencode "username=210001A" --data-urlencode "password=secret" "http://127.0.0.1:$PORT$ACTION" > /dev/null
+curl -s -X POST --data-urlencode "username=210001A" --data-urlencode "password=secret" "$RESOLVED_ACTION" > /dev/null
 echo "  -> Form submitted successfully!"
 
 echo "[Test 4] Post-login probe verification:"
@@ -109,6 +115,56 @@ MARGINAL_DIFF=$((MARGINAL_SCORE - SCORE_24GHZ))
 if [ "$MARGINAL_DIFF" -lt 150 ]; then
     echo "  -> Marginal candidate difference ($((MARGINAL_DIFF / 10)).$((MARGINAL_DIFF % 10)) pts) is within 15.0 pt margin: Flapping prevented!"
 fi
+
+echo "[Test 7] Aruba & Multi-Vendor Hidden Token Extraction Validation:"
+MOCK_ARUBA_HTML='<html><form action="/cgi-bin/login" method="POST"><input type="hidden" name="cmd" value="authenticate"><input type="hidden" name="mac" value="aa:bb:cc:dd:ee:ff"><input type="text" name="user"><input type="password" name="password"></form></html>'
+HIDDEN_TOKENS=$(echo "$MOCK_ARUBA_HTML" | grep -i -o '<input[^>]*>' | while read -r tag; do
+    if echo "$tag" | grep -iq 'type=["'\''"]\?hidden'; then
+        n="$(echo "$tag" | sed -E -n 's/.*name=["'\''"]([^"'\''>[:space:]]+)["'\''"].*/\1/p')"
+        v="$(echo "$tag" | sed -E -n 's/.*value=["'\''"]([^"'\''>]*).*/\1/p')"
+        [ -n "$n" ] && echo "$n=$v"
+    fi
+done)
+if echo "$HIDDEN_TOKENS" | grep -q "cmd=authenticate" && echo "$HIDDEN_TOKENS" | grep -q "mac=aa:bb:cc:dd:ee:ff"; then
+    echo "  -> Success: Successfully extracted hidden CSRF/Aruba tokens dynamically!"
+else
+    echo "  -> ERROR: Failed to extract hidden tokens!"
+    exit 1
+fi
+
+echo "[Test 8] Campus SSID Network Discovery & Priority Pattern Validation:"
+MOCK_EXISTING_PROFILES="vivo Y04 2
+Dialog 4G 072
+UoM.Wireless
+UoM.Wireless 1
+UoM_Wireless
+Pixel6"
+
+for ssid in "UoM_Wireless" "UoM.Wireless" "UoM-Wireless"; do
+    MATCHED=$(echo "$MOCK_EXISTING_PROFILES" | grep -E "^${ssid}(\s+[0-9]+)?$" || true)
+    if [ "$ssid" = "UoM.Wireless" ]; then
+        if echo "$MATCHED" | grep -q "UoM.Wireless" && echo "$MATCHED" | grep -q "UoM.Wireless 1"; then
+            echo "  -> Success: Discovered existing '$ssid' and variant 'UoM.Wireless 1' for priority enforcement!"
+        else
+            echo "  -> ERROR: Failed to match '$ssid' profiles!"
+            exit 1
+        fi
+    elif [ "$ssid" = "UoM_Wireless" ]; then
+        if echo "$MATCHED" | grep -q "UoM_Wireless"; then
+            echo "  -> Success: Discovered existing '$ssid' for priority enforcement!"
+        else
+            echo "  -> ERROR: Failed to match '$ssid'!"
+            exit 1
+        fi
+    elif [ "$ssid" = "UoM-Wireless" ]; then
+        if [ -z "$MATCHED" ]; then
+            echo "  -> Success: Detected missing '$ssid' for fresh profile creation with priority 100!"
+        else
+            echo "  -> ERROR: Expected no matches for unconfigured '$ssid'!"
+            exit 1
+        fi
+    fi
+done
 
 echo ""
 echo "🎉 ALL CAPTIVE PORTAL & AP OPTIMIZATION TESTS PASSED!"

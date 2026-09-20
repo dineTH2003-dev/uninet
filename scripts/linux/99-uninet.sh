@@ -11,12 +11,15 @@ if [ "$ACTION" != "up" ] && [ "$ACTION" != "connectivity-change" ]; then
     exit 0
 fi
 
-# 2. ULTRA-LOW RESOURCE OPTIMIZATION: Check SSID directly in bash
-# Never spawn Python if connected to Home, Mobile Hotspot, or other networks
-CURRENT_SSID="$(nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | grep '^yes:' | cut -d':' -f2 || true)"
+# 2. ULTRA-LOW RESOURCE OPTIMIZATION: Instant SSID check in pure bash
+# NetworkManager passes $CONNECTION_ID in the environment; fallback to nmcli
+SSID="${CONNECTION_ID:-}"
+if [ -z "$SSID" ]; then
+    SSID="$(nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | grep '^yes:' | cut -d':' -f2 || true)"
+fi
 
 # Match against University SSID patterns (case-insensitive)
-case "${CURRENT_SSID,,}" in
+case "${SSID,,}" in
     *uom*|*wireless*|*campus*|*university*|*student*)
         ;; # University network matched, proceed
     *)
@@ -24,13 +27,12 @@ case "${CURRENT_SSID,,}" in
         ;;
 esac
 
-# 3. Locate uninet binary
+# 3. Locate uninet binary - prioritize user-level binary so updates take effect immediately
 UNINET_BIN=""
 for candidate in \
-    /usr/local/bin/uninet \
-    /usr/bin/uninet \
     /home/*/.local/bin/uninet \
-    /home/*/dev/uninet/.venv/bin/uninet; do
+    /usr/local/bin/uninet \
+    /usr/bin/uninet; do
     if [ -x "$candidate" ]; then
         UNINET_BIN="$candidate"
         break
@@ -41,10 +43,14 @@ if [ -z "$UNINET_BIN" ]; then
     exit 0
 fi
 
-# 4. Wait 2 seconds for DHCP, then run lightweight login in background
+# 4. Wait 2 seconds for DHCP lease and gateway to settle, then run login in background
 (
     sleep 2
+    # Sync global binary if running as root and user binary is newer
+    if [ -w "/usr/local/bin/uninet" ] && [ -f "$UNINET_BIN" ] && [ "$UNINET_BIN" != "/usr/local/bin/uninet" ]; then
+        cp "$UNINET_BIN" /usr/local/bin/uninet 2>/dev/null || true
+    fi
     $UNINET_BIN login --quiet
-) > /dev/null 2>&1 &
+) >> /var/log/uninet.log 2>&1 &
 
 exit 0

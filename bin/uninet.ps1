@@ -17,7 +17,7 @@ param (
     [switch]$Quiet
 )
 
-$Version = "1.0.5"
+$Version = "1.0.6"
 $RepoRawUrl = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 $ConfigDir = "$env:APPDATA\uninet"
 $CredsFile = "$ConfigDir\credentials.json"
