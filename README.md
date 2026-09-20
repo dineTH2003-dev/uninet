@@ -104,6 +104,9 @@ uninet trust
 # Force manual login
 uninet login
 
+# Check for and install the latest update
+uninet update
+
 # Uninstall UniNet
 uninet uninstall
 ```
@@ -128,9 +131,22 @@ uninet trust
 # Force manual login
 uninet login
 
+# Check for and install the latest update
+uninet update
+
 # Completely remove UniNet
 uninet uninstall
 ```
+
+---
+
+## 🔄 Updating UniNet
+
+UniNet includes a built-in zero-dependency self-updater that upgrades to the latest release while keeping your saved student credentials completely intact:
+```bash
+uninet update
+```
+Whenever an update is available on GitHub, running `uninet status` or `uninet scan` will also display a subtle notification banner reminding you to upgrade.
 
 ---
 

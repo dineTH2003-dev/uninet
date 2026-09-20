@@ -13,6 +13,7 @@
 set -eo pipefail
 
 VERSION="1.0.3"
+REPO_RAW_URL="https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
 USER_CREDS="$CONFIG_DIR/credentials.json"
 SYSTEM_CREDS="/etc/uninet/credentials.json"
@@ -180,6 +181,19 @@ cmd_login() {
 }
 
 # 6. Status check
+check_version_notification() {
+    [ -t 1 ] || return 0
+    is_online || return 0
+
+    local latest_ver
+    latest_ver="$(curl -fsSL --connect-timeout 1 --max-time 1.5 "$REPO_RAW_URL/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+
+    if [ -n "$latest_ver" ] && [ "$latest_ver" != "$VERSION" ]; then
+        echo -e "\n${YELLOW}💡 A new version of UniNet is available (v${latest_ver}).${RESET}"
+        echo -e "   Run ${BOLD}uninet update${RESET} to upgrade automatically."
+    fi
+}
+
 cmd_status() {
     local ssid
     ssid="$(get_active_ssid)"
@@ -199,6 +213,8 @@ cmd_status() {
     else
         echo -e "${BOLD}Internet:${RESET}       ${YELLOW}CAPTIVE PORTAL / OFFLINE${RESET}"
     fi
+
+    check_version_notification
 }
 
 # 7. University of Moratuwa Official Terminal Crest & Setup Wizard
@@ -461,6 +477,7 @@ cmd_scan() {
             "$status" "${ss:0:18}" "$bs" "$bnd" "$rt" "${sig}%" "$display_score" "$suffix"
     done <<< "$sorted"
     echo ""
+    check_version_notification
 }
 
 cmd_optimize() {
@@ -546,7 +563,69 @@ cmd_uninstall() {
     echo -e "${GREEN}✔ UniNet has been completely uninstalled.${RESET}"
 }
 
-# 11. CLI Route
+# 11. Self-Updater
+cmd_update() {
+    log "Checking for updates..."
+    local latest_ver
+    latest_ver="$(curl -fsSL --connect-timeout 4 --max-time 6 "$REPO_RAW_URL/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+
+    if [ -z "$latest_ver" ]; then
+        echo -e "${RED}Error: Unable to fetch latest version information. Please check your internet connection.${RESET}"
+        return 1
+    fi
+
+    if [ "$latest_ver" = "$VERSION" ]; then
+        echo -e "${GREEN}✔ UniNet is already up to date (v$VERSION).${RESET}"
+        return 0
+    fi
+
+    echo -e "Found newer version: ${BOLD}v${latest_ver}${RESET} (current: v${VERSION}). Upgrading..."
+
+    local temp_bin
+    temp_bin="$(mktemp)"
+    if ! curl -fsSL --connect-timeout 5 --max-time 15 "$REPO_RAW_URL/bin/uninet" -o "$temp_bin"; then
+        rm -f "$temp_bin"
+        echo -e "${RED}Error: Failed to download update from GitHub.${RESET}"
+        return 1
+    fi
+
+    if ! head -n 1 "$temp_bin" | grep -q "bash"; then
+        rm -f "$temp_bin"
+        echo -e "${RED}Error: Downloaded file corrupted or invalid.${RESET}"
+        return 1
+    fi
+
+    chmod +x "$temp_bin"
+
+    # Update installed locations
+    local updated=0
+    if [ -f "$HOME/.local/bin/uninet" ] || [ -w "$HOME/.local/bin" ]; then
+        mkdir -p "$HOME/.local/bin"
+        cp "$temp_bin" "$HOME/.local/bin/uninet"
+        chmod 755 "$HOME/.local/bin/uninet"
+        updated=$((updated + 1))
+    fi
+
+    if [ -f "/usr/local/bin/uninet" ] || [ -w "/usr/local/bin" ]; then
+        if [ -w "/usr/local/bin" ]; then
+            cp "$temp_bin" "/usr/local/bin/uninet"
+            chmod 755 "/usr/local/bin/uninet"
+            updated=$((updated + 1))
+        elif command -v sudo &>/dev/null; then
+            sudo cp "$temp_bin" "/usr/local/bin/uninet" 2>/dev/null && sudo chmod 755 "/usr/local/bin/uninet" 2>/dev/null && updated=$((updated + 1)) || true
+        fi
+    fi
+
+    rm -f "$temp_bin"
+
+    if [ "$updated" -gt 0 ]; then
+        echo -e "${GREEN}✔ Successfully updated UniNet to v${latest_ver}!${RESET}"
+    else
+        echo -e "${YELLOW}Warning: Update downloaded but could not write to binary path.${RESET}"
+    fi
+}
+
+# 12. CLI Route
 case "$1" in
     login)
         shift
@@ -568,6 +647,9 @@ case "$1" in
     trust)
         cmd_trust_networks
         ;;
+    update)
+        cmd_update
+        ;;
     uninstall)
         cmd_uninstall
         ;;
@@ -586,6 +668,7 @@ case "$1" in
         echo "  status       Check current Wi-Fi and internet status"
         echo "  setup        Configure student ID and password"
         echo "  trust        Register UoM SSIDs for automatic Wi-Fi join"
+        echo "  update       Check for and install the latest UniNet version"
         echo "  uninstall    Remove UniNet and background hooks from machine"
         echo ""
         ;;

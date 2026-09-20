@@ -18,6 +18,7 @@ param (
 )
 
 $Version = "1.0.3"
+$RepoRawUrl = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 $ConfigDir = "$env:APPDATA\uninet"
 $CredsFile = "$ConfigDir\credentials.json"
 $ProbeUrl = "http://connectivitycheck.gstatic.com/generate_204"
@@ -183,7 +184,22 @@ function Invoke-UniLogin {
     }
 }
 
-# 6. Status Command
+# 6. Status Command & Version Notification
+function Test-VersionNotification {
+    if (-not (Test-IsOnline)) { return }
+
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent", "UniNet-Windows")
+        $latest = ($wc.DownloadString("$RepoRawUrl/VERSION")).Trim()
+        if ($latest -and $latest -ne $Version) {
+            Write-Host "[*] A new version of UniNet is available (v$latest)." -ForegroundColor Yellow
+            Write-Host "    Run 'uninet update' to upgrade automatically.`n" -ForegroundColor Yellow
+        }
+    } catch { }
+}
+
 function Show-UniStatus {
     $ssid = Get-ActiveSSID
     Write-Host "`n=== UniNet Windows Status ===" -ForegroundColor Cyan
@@ -202,6 +218,8 @@ function Show-UniStatus {
     } else {
         Write-Host "Internet:       CAPTIVE PORTAL / OFFLINE`n" -ForegroundColor Yellow
     }
+
+    Test-VersionNotification
 }
 
 # 7. University of Moratuwa Official Terminal Crest & Setup Wizard
@@ -482,6 +500,7 @@ function Show-CampusScan {
         Write-Host $line
     }
     Write-Host ""
+    Test-VersionNotification
 }
 
 function Optimize-Connection {
@@ -560,6 +579,48 @@ function Invoke-UniUninstall {
     Write-Host "[+] UniNet has been completely removed from your Windows machine." -ForegroundColor Green
 }
 
+function Invoke-UniUpdate {
+    Write-UniLog "Checking for updates..." "Cyan"
+
+    $latest = ""
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent", "UniNet-Windows")
+        $latest = ($wc.DownloadString("$RepoRawUrl/VERSION")).Trim()
+    } catch {
+        Write-Host "Error: Unable to check for updates. Please check your internet connection." -ForegroundColor Red
+        return
+    }
+
+    if ($latest -eq $Version) {
+        Write-Host "[+] UniNet is already up to date (v$Version)." -ForegroundColor Green
+        return
+    }
+
+    Write-Host "Found newer version: v$latest (current: v$Version). Upgrading..." -ForegroundColor Cyan
+
+    $installDir = "C:\ProgramData\uninet"
+    $targetFile = "$installDir\uninet.ps1"
+    $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "uninet_new.ps1")
+
+    try {
+        $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $tempFile)
+        if (-not (Test-Path $tempFile) -or (Get-Item $tempFile).Length -lt 500) {
+            Write-Host "Error: Downloaded file corrupted or invalid." -ForegroundColor Red
+            return
+        }
+
+        # Replace installed script
+        Copy-Item -Path $tempFile -Destination $targetFile -Force
+        Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
+
+        Write-Host "[+] Successfully updated UniNet to v$latest!" -ForegroundColor Green
+    } catch {
+        Write-Host "Error: Failed to apply update: $_" -ForegroundColor Red
+    }
+}
+
 # 9. Command Router
 switch ($Command.ToLower()) {
     "login"      { Invoke-UniLogin }
@@ -569,10 +630,11 @@ switch ($Command.ToLower()) {
     "status"     { Show-UniStatus }
     "setup"      { Invoke-UniSetup }
     "trust"      { Add-TrustedNetworks }
+    "update"     { Invoke-UniUpdate }
     "uninstall"  { Invoke-UniUninstall }
     "help"       {
         Write-Host "UniNet Windows v$Version"
-        Write-Host "Usage: .\uninet.ps1 [login | optimize | scan | status | setup | trust | uninstall]"
+        Write-Host "Usage: .\uninet.ps1 [login | optimize | scan | status | setup | trust | update | uninstall]"
     }
     default      { Invoke-UniLogin }
 }
