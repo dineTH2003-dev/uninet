@@ -164,3 +164,13 @@ fi
 
 # 6. Interactive Setup
 "$TARGET_BIN" setup
+
+# 7. Anonymous Install Telemetry Counter (Hits.sh - 100% Privacy Preserving)
+(
+    curl -fsSL --connect-timeout 2 --max-time 4 "https://hits.sh/github.com/dineTH2003-dev/uninet/installs.svg" >/dev/null 2>&1 || true
+    if [ "$PLATFORM" = "macos" ]; then
+        curl -fsSL --connect-timeout 2 --max-time 4 "https://hits.sh/github.com/dineTH2003-dev/uninet/installs-macos.svg" >/dev/null 2>&1 || true
+    else
+        curl -fsSL --connect-timeout 2 --max-time 4 "https://hits.sh/github.com/dineTH2003-dev/uninet/installs-linux.svg" >/dev/null 2>&1 || true
+    fi
+) >/dev/null 2>&1 &

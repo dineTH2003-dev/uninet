@@ -122,3 +122,12 @@ Remove-Item $TempXml -Force -ErrorAction SilentlyContinue
 
 # 3. Launch interactive credentials setup in a dedicated PowerShell process
 & powershell.exe -ExecutionPolicy Bypass -NoProfile -File "$ScriptDest" setup
+
+# 4. Anonymous Install Telemetry Counter (Hits.sh - 100% Privacy Preserving)
+try {
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    $wcPing = New-Object System.Net.WebClient
+    $wcPing.Headers.Add("User-Agent", "UniNet-Installer")
+    $null = $wcPing.DownloadStringAsync((New-Object System.Uri("https://hits.sh/github.com/dineTH2003-dev/uninet/installs.svg")))
+    $null = $wcPing.DownloadStringAsync((New-Object System.Uri("https://hits.sh/github.com/dineTH2003-dev/uninet/installs-windows.svg")))
+} catch { }
