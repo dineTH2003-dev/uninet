@@ -268,6 +268,9 @@ EOF
         sudo chmod 600 "$SYSTEM_CREDS" 2>/dev/null || true
     fi
 
+    # Register UoM SSIDs as trusted networks for auto-join
+    cmd_trust_networks
+
     # Quiet connection test if currently connected to a campus network
     if [ -n "$current_ssid" ] && is_university_network "$current_ssid"; then
         if ! is_online; then
@@ -279,12 +282,46 @@ EOF
     echo -e "✔ Credentials securely saved!"
     echo -e "✨ You are all set!"
     echo -e ""
-    echo -e "Whenever your laptop connects to university Wi-Fi:"
+    echo -e "Your machine will now automatically join university Wi-Fi"
+    echo -e "whenever it is in range — no manual selection needed:"
     echo -e "  • UoM_Wireless"
     echo -e "  • UoM.Wireless"
     echo -e "  • UoM-Wireless"
-    echo -e "UniNet will automatically authenticate in the background!"
+    echo -e "UniNet will authenticate the portal in the background!"
     echo -e "========================================================${RESET}\n"
+}
+
+# 9a. Trust UoM Networks — register open WLAN profiles for auto-join
+cmd_trust_networks() {
+    if ! command -v nmcli &>/dev/null; then
+        return
+    fi
+
+    local ssids=("UoM_Wireless" "UoM.Wireless" "UoM-Wireless")
+    local added=0
+    for ssid in "${ssids[@]}"; do
+        # Skip if a profile already exists for this SSID
+        if nmcli -t -f NAME connection show 2>/dev/null | grep -qF "$ssid"; then
+            continue
+        fi
+        # Add an open (no-encryption) profile with autoconnect at high priority
+        if nmcli connection add \
+            type wifi \
+            con-name "$ssid" \
+            ssid "$ssid" \
+            connection.autoconnect yes \
+            connection.autoconnect-priority 100 \
+            802-11-wireless.mode infrastructure \
+            ipv4.method auto \
+            ipv6.method auto \
+            -- 2>/dev/null; then
+            added=$((added + 1))
+        fi
+    done
+
+    if [ "$added" -gt 0 ]; then
+        log "Registered $added university network profile(s) for automatic Wi-Fi join."
+    fi
 }
 
 # 8. Wi-Fi Multi-Factor Quality Scoring & Network Scanning
@@ -518,6 +555,9 @@ case "$1" in
     setup)
         cmd_setup
         ;;
+    trust)
+        cmd_trust_networks
+        ;;
     uninstall)
         cmd_uninstall
         ;;
@@ -535,6 +575,7 @@ case "$1" in
         echo "  scan         List nearby campus Wi-Fi networks with quality scores"
         echo "  status       Check current Wi-Fi and internet status"
         echo "  setup        Configure student ID and password"
+        echo "  trust        Register UoM SSIDs for automatic Wi-Fi join"
         echo "  uninstall    Remove UniNet and background hooks from machine"
         echo ""
         ;;

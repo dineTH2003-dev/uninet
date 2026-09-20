@@ -251,15 +251,51 @@ function Invoke-UniSetup {
         }
     }
 
+    # Register UoM SSIDs as trusted networks for auto-join
+    Add-TrustedNetworks
+
     Write-Host "`n========================================================" -ForegroundColor Green
     Write-Host "[+] Credentials securely saved!" -ForegroundColor Green
     Write-Host "You are all set!`n" -ForegroundColor Green
-    Write-Host "Whenever your Windows laptop connects to university Wi-Fi:" -ForegroundColor Green
+    Write-Host "Your Windows machine will now automatically join university" -ForegroundColor Green
+    Write-Host "Wi-Fi whenever it is in range - no manual selection needed:" -ForegroundColor Green
     Write-Host "  - UoM_Wireless" -ForegroundColor Green
     Write-Host "  - UoM.Wireless" -ForegroundColor Green
     Write-Host "  - UoM-Wireless" -ForegroundColor Green
-    Write-Host "UniNet will automatically authenticate in the background!" -ForegroundColor Green
+    Write-Host "UniNet will authenticate the portal in the background!" -ForegroundColor Green
     Write-Host "========================================================`n" -ForegroundColor Green
+}
+
+# 7b. Trust UoM Networks -- import open WLAN profiles so Windows auto-joins
+function Add-TrustedNetworks {
+    $ssids = @("UoM_Wireless", "UoM.Wireless", "UoM-Wireless")
+    $added = 0
+    foreach ($ssid in $ssids) {
+        $profileXml = "<?xml version=""1.0""?>" +
+            "<WLANProfile xmlns=""http://www.microsoft.com/networking/WLAN/profile/v1"">" +
+            "<name>$ssid</name>" +
+            "<SSIDConfig><SSID><name>$ssid</name></SSID></SSIDConfig>" +
+            "<connectionType>ESS</connectionType>" +
+            "<connectionMode>auto</connectionMode>" +
+            "<MSM><security><authEncryption>" +
+            "<authentication>open</authentication>" +
+            "<encryption>none</encryption>" +
+            "<useOneX>false</useOneX>" +
+            "</authEncryption></security></MSM>" +
+            "</WLANProfile>"
+
+        $tmpFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "$ssid.xml")
+        try {
+            [System.IO.File]::WriteAllText($tmpFile, $profileXml, [System.Text.Encoding]::ASCII)
+            $result = cmd.exe /c "netsh wlan add profile filename=`"$tmpFile`" user=all 2>nul"
+            if ($LASTEXITCODE -eq 0) { $added++ }
+        } catch { }
+        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($added -gt 0) {
+        Write-UniLog "Registered $added university network profile(s) for automatic Wi-Fi join." "Green"
+    }
 }
 
 # 8. Wi-Fi Multi-Factor Quality Scoring & Network Scanning
@@ -450,9 +486,10 @@ switch ($Command.ToLower()) {
     "scan"       { Show-CampusScan }
     "status"     { Show-UniStatus }
     "setup"      { Invoke-UniSetup }
+    "trust"      { Add-TrustedNetworks }
     "help"       {
         Write-Host "UniNet Windows v$Version"
-        Write-Host "Usage: .\uninet.ps1 [login | optimize | scan | status | setup]"
+        Write-Host "Usage: .\uninet.ps1 [login | optimize | scan | status | setup | trust]"
     }
     default      { Invoke-UniLogin }
 }

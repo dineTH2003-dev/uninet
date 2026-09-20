@@ -246,23 +246,46 @@ cmd_setup() {
 EOF
     chmod 600 "$USER_CREDS"
 
-    # Quiet connection test if currently connected to a campus network
+    # Also save to system if sudo is available
     if [ -n "$current_ssid" ] && is_university_network "$current_ssid"; then
         if ! is_online; then
             cmd_login -q 2>/dev/null || true
         fi
     fi
 
+    # Register UoM SSIDs as trusted networks for auto-join
+    cmd_trust_networks
+
     echo -e "\n${BOLD}${GREEN}========================================================"
     echo -e "✔ Credentials securely saved!"
     echo -e "✨ You are all set!"
     echo -e ""
-    echo -e "Whenever your laptop connects to university Wi-Fi:"
+    echo -e "Your Mac will now automatically join university Wi-Fi"
+    echo -e "whenever it is in range — no manual selection needed:"
     echo -e "  • UoM_Wireless"
     echo -e "  • UoM.Wireless"
     echo -e "  • UoM-Wireless"
-    echo -e "UniNet will automatically authenticate in the background!"
+    echo -e "UniNet will authenticate the portal in the background!"
     echo -e "========================================================${RESET}\n"
+}
+
+# 9a. Trust UoM Networks — add to macOS preferred wireless networks list
+cmd_trust_networks() {
+    local iface
+    iface="$(get_wifi_interface)"
+
+    local ssids=("UoM_Wireless" "UoM.Wireless" "UoM-Wireless")
+    local added=0
+    for ssid in "${ssids[@]}"; do
+        # Add at index 0 = highest priority, OPEN auth (no WPA key)
+        if networksetup -addpreferredwirelessnetworkatindex "$iface" "$ssid" 0 OPEN 2>/dev/null; then
+            added=$((added + 1))
+        fi
+    done
+
+    if [ "$added" -gt 0 ]; then
+        log "Registered $added university network(s) as preferred Wi-Fi for auto-join."
+    fi
 }
 
 # 8. Wi-Fi Multi-Factor Quality Scoring & Network Scanning
@@ -481,6 +504,9 @@ case "$1" in
     setup)
         cmd_setup
         ;;
+    trust)
+        cmd_trust_networks
+        ;;
     uninstall)
         rm -rf "$CONFIG_DIR"
         echo "Removed configuration."
@@ -499,6 +525,7 @@ case "$1" in
         echo "  scan         List nearby campus Wi-Fi networks with quality scores"
         echo "  status       Check current Wi-Fi and internet status"
         echo "  setup        Configure student ID and password"
+        echo "  trust        Register UoM SSIDs for automatic Wi-Fi join"
         echo "  uninstall    Remove credentials and configuration"
         echo ""
         ;;
