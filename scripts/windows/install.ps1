@@ -70,10 +70,15 @@ if ($MachinePath -notlike "*$InstallDir*") {
     }
 }
 
+# Create uninet_silent.vbs so background task execution is 100% invisible (no console popup)
+$VbsDest = "$InstallDir\uninet_silent.vbs"
+$VbsContent = "Set WshShell = CreateObject(""WScript.Shell"")`r`nWshShell.Run ""powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -WindowStyle Hidden -File """""" & WScript.Arguments(0) & """""" login -Quiet"", 0, False"
+[System.IO.File]::WriteAllText($VbsDest, $VbsContent, [System.Text.Encoding]::ASCII)
+
 # 2. Register Windows Task Scheduler trigger on Wi-Fi Connection (Event 8001)
 $TaskName = "UniNetAutoConnect"
-$Action = "powershell.exe"
-$Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptDest`" login -Quiet"
+$Action = "wscript.exe"
+$Arguments = "//B //Nologo `"$VbsDest`" `"$ScriptDest`""
 
 # Safely unregister old task if present (using cmd /c to completely isolate NativeCommandError)
 $null = cmd.exe /c "schtasks /delete /tn `"$TaskName`" /f >nul 2>nul"

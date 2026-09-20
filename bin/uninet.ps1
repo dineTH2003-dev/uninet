@@ -17,7 +17,7 @@ param (
     [switch]$Quiet
 )
 
-$Version = "1.0.1"
+$Version = "1.0.2"
 $ConfigDir = "$env:APPDATA\uninet"
 $CredsFile = "$ConfigDir\credentials.json"
 $ProbeUrl = "http://connectivitycheck.gstatic.com/generate_204"
@@ -92,7 +92,15 @@ function Get-SavedCredentials {
 
 # 5. Core Login Flow
 function Invoke-UniLogin {
-    $ssid = Get-ActiveSSID
+    # Allow DHCP and Wi-Fi stack to settle when triggered on event
+    $ssid = ""
+    for ($i = 0; $i -lt 5; $i++) {
+        $ssid = Get-ActiveSSID
+        if ($ssid -and (Test-UniversityNetwork $ssid)) {
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
 
     if ([string]::IsNullOrWhiteSpace($ssid)) {
         Write-UniLog "No active Wi-Fi connection detected." "Gray"
@@ -104,6 +112,9 @@ function Invoke-UniLogin {
         return
     }
 
+    # Small delay to ensure DHCP lease and routing are established
+    Start-Sleep -Seconds 2
+
     if (Test-IsOnline) {
         Write-UniLog "Already connected to the internet on $ssid." "Green"
         return
@@ -113,22 +124,39 @@ function Invoke-UniLogin {
 
     $creds = Get-SavedCredentials
     if (-not $creds) {
-        Write-UniLog "Error: No saved credentials found. Run 'uninet.ps1 setup' first." "Red"
+        Write-UniLog "Error: No saved credentials found. Run 'uninet setup' first." "Red"
         return
     }
 
-    # Probe portal with WebRequest to get redirect URL
+    # Probe portal with retry to capture redirect URL and session cookies
     $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-    $landingUrl = $ProbeUrl
-    try {
-        # Allow untrusted SSL for internal university gateways
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-        $resp = Invoke-WebRequest -Uri $ProbeUrl -SessionVariable "session" -MaximumRedirection 5 -TimeoutSec 8 -UseBasicParsing
-        $landingUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
-    } catch {
-        if ($_.Exception.Response) {
-            $landingUrl = $_.Exception.Response.ResponseUri.AbsoluteUri
+    $landingUrl = ""
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            # Allow untrusted SSL for internal university gateways
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+            $resp = Invoke-WebRequest -Uri $ProbeUrl -SessionVariable "session" -MaximumRedirection 5 -TimeoutSec 6 -UseBasicParsing -ErrorAction SilentlyContinue
+            if ($resp) {
+                if ($resp.StatusCode -eq 204) {
+                    Write-UniLog "[+] Already connected! Internet is now active on $ssid." "Green"
+                    return
+                }
+                if ($resp.BaseResponse -and $resp.BaseResponse.ResponseUri) {
+                    $landingUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
+                    break
+                }
+            }
+        } catch {
+            if ($_.Exception.Response -and $_.Exception.Response.ResponseUri) {
+                $landingUrl = $_.Exception.Response.ResponseUri.AbsoluteUri
+                break
+            }
         }
+        Start-Sleep -Seconds 1
+    }
+
+    if (-not $landingUrl) {
+        $landingUrl = $ProbeUrl
     }
 
     Write-UniLog "Submitting login credentials for $($creds.username)..." "Cyan"
@@ -270,6 +298,16 @@ function Invoke-UniSetup {
 function Add-TrustedNetworks {
     $ssids = @("UoM_Wireless", "UoM.Wireless", "UoM-Wireless")
     $added = 0
+
+    $iface = ""
+    try {
+        $ifLines = netsh wlan show interfaces
+        $ifMatch = $ifLines | Select-String "^\s*Name\s*:" | Select-Object -First 1
+        if ($ifMatch) {
+            $iface = ($ifMatch.Line -split ":")[1].Trim()
+        }
+    } catch { }
+
     foreach ($ssid in $ssids) {
         $profileXml = "<?xml version=""1.0""?>" +
             "<WLANProfile xmlns=""http://www.microsoft.com/networking/WLAN/profile/v1"">" +
@@ -287,8 +325,12 @@ function Add-TrustedNetworks {
         $tmpFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "$ssid.xml")
         try {
             [System.IO.File]::WriteAllText($tmpFile, $profileXml, [System.Text.Encoding]::ASCII)
-            $result = cmd.exe /c "netsh wlan add profile filename=`"$tmpFile`" user=all 2>nul"
-            if ($LASTEXITCODE -eq 0) { $added++ }
+            $null = cmd.exe /c "netsh wlan add profile filename=`"$tmpFile`" user=all 2>nul"
+            $null = cmd.exe /c "netsh wlan set profileparameter name=`"$ssid`" connectionmode=auto autoswitch=Yes 2>nul"
+            if ($iface) {
+                $null = cmd.exe /c "netsh wlan set profileorder name=`"$ssid`" interface=`"$iface`" priority=1 2>nul"
+            }
+            $added++
         } catch { }
         Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
     }
