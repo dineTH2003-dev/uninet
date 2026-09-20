@@ -17,7 +17,7 @@ param (
     [switch]$Quiet
 )
 
-$Version = "1.0.4"
+$Version = "1.0.5"
 $RepoRawUrl = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 $ConfigDir = "$env:APPDATA\uninet"
 $CredsFile = "$ConfigDir\credentials.json"
@@ -626,7 +626,7 @@ function Invoke-UniUpdate {
         Write-Host "Error: Downloaded file corrupted or invalid." -ForegroundColor Red
         return
     }
-
+    try {
         # Replace installed script
         Copy-Item -Path $tempFile -Destination $targetFile -Force
         Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
