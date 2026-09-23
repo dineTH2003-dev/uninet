@@ -300,8 +300,27 @@ cmd_login() {
         [ $quiet -eq 0 ] && log "Detected Aruba Networks portal (UoM.Wireless). Using cmd=authenticate..."
     fi
 
+    # --- Ruijie Networks portal (UoM-Wireless) ---
+    # Portal served at connect.uom.lk:8443
+    # Form action: /login, landing: /auth_success.html
+    if [[ "$action_url" == *":8443"* ]] || [[ "$portal_base_url" == *":8443"* ]] || [[ "${ssid,,}" == *"uom-wireless"* ]]; then
+        if [[ "$action_url" == *"/index.html"* ]]; then
+            action_url="${action_url%/index.html}/login"
+        elif [[ "$action_url" == *"connect.uom.lk:8443" ]] || [[ "$action_url" == *"connect.uom.lk:8443/" ]]; then
+            action_url="https://connect.uom.lk:8443/login"
+        fi
+        if ! [[ "${curl_data[*]}" == *"username="* ]]; then
+            curl_data+=(--data-urlencode "username=$USERNAME")
+        fi
+        if ! [[ "${curl_data[*]}" == *"password="* ]]; then
+            curl_data+=(--data-urlencode "password=$PASSWORD")
+        fi
+        [ $quiet -eq 0 ] && log "Detected Ruijie Networks portal (UoM-Wireless). Submitting to $action_url..."
+    fi
+
     # 5. Submit authentication request
     curl -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+        -e "$portal_base_url" \
         -X POST \
         "${curl_data[@]}" \
         --max-time 10 \

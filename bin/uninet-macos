@@ -239,7 +239,33 @@ cmd_login() {
         curl_data+=(--data-urlencode "password=$PASSWORD")
     fi
 
-    # 4. Aruba Networks specific requirements (uom.wireless)
+    # 4. Vendor-specific payload injection
+    # --- Cisco/NEC WebAuth portal (UoM_Wireless) ---
+    if [[ "$action_url" == *"/login.html"* ]] || \
+       echo "$probe_output" | grep -iq 'name=[^>]*buttonClicked'; then
+        local filtered_data=()
+        local skip_next=0
+        for item in "${curl_data[@]}"; do
+            if [ "$skip_next" -eq 1 ]; then
+                skip_next=0
+                continue
+            fi
+            if [ "$item" = "--data-urlencode" ]; then
+                filtered_data+=("$item")
+            elif [[ "$item" == buttonClicked=* ]] || [[ "$item" == err_flag=1* ]]; then
+                unset 'filtered_data[-1]'
+                skip_next=0
+            else
+                filtered_data+=("$item")
+            fi
+        done
+        curl_data=("${filtered_data[@]}")
+        curl_data+=(--data-urlencode "buttonClicked=4")
+        curl_data+=(--data-urlencode "err_flag=0")
+        [ $quiet -eq 0 ] && log "Detected Cisco/NEC WebAuth portal (UoM_Wireless). Using buttonClicked=4..."
+    fi
+
+    # --- Aruba Networks portal (UoM.Wireless) ---
     if [[ "$action_url" == *"cgi-bin/login"* ]] || [[ "${ssid,,}" == *"uom.wireless"* ]]; then
         if ! [[ "${curl_data[*]}" == *"cmd="* ]]; then
             curl_data+=(--data-urlencode "cmd=authenticate")
@@ -248,10 +274,28 @@ cmd_login() {
             curl_data+=(--data-urlencode "user=$USERNAME")
         fi
         curl_data+=(--data-urlencode "Login=Log In")
+        [ $quiet -eq 0 ] && log "Detected Aruba Networks portal (UoM.Wireless). Using cmd=authenticate..."
+    fi
+
+    # --- Ruijie Networks portal (UoM-Wireless) ---
+    if [[ "$action_url" == *":8443"* ]] || [[ "$portal_base_url" == *":8443"* ]] || [[ "${ssid,,}" == *"uom-wireless"* ]]; then
+        if [[ "$action_url" == *"/index.html"* ]]; then
+            action_url="${action_url%/index.html}/login"
+        elif [[ "$action_url" == *"connect.uom.lk:8443" ]] || [[ "$action_url" == *"connect.uom.lk:8443/" ]]; then
+            action_url="https://connect.uom.lk:8443/login"
+        fi
+        if ! [[ "${curl_data[*]}" == *"username="* ]]; then
+            curl_data+=(--data-urlencode "username=$USERNAME")
+        fi
+        if ! [[ "${curl_data[*]}" == *"password="* ]]; then
+            curl_data+=(--data-urlencode "password=$PASSWORD")
+        fi
+        [ $quiet -eq 0 ] && log "Detected Ruijie Networks portal (UoM-Wireless). Submitting to $action_url..."
     fi
 
     # 5. Submit authentication request
     curl -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+        -e "$portal_base_url" \
         -X POST \
         "${curl_data[@]}" \
         --max-time 10 \
