@@ -12,13 +12,14 @@
 
 set -eo pipefail
 
-VERSION="1.0.8"
+VERSION="1.0.9"
 REPO_RAW_URL="https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
 USER_CREDS="$CONFIG_DIR/credentials.json"
 SYSTEM_CREDS="/etc/uninet/credentials.json"
 COOKIE_JAR="/tmp/uninet_cookies_$UID.txt"
 PROBE_URL="http://connectivitycheck.gstatic.com/generate_204"
+ARUBA_PROBE_URL="http://connectivity-check.ubuntu.com./"
 
 # University SSIDs to match
 MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless" "uom" "wireless" "campus")
@@ -159,34 +160,77 @@ cmd_login() {
         exit 0
     fi
 
-    # Check if already online
+    # Check if already online via gstatic (works for Cisco/Ruijie)
     if is_online; then
-        [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
-        exit 0
+        # For Aruba (UoM.Wireless): gstatic can bypass the portal without being blocked.
+        # Double-check with the URL Aruba actually intercepts.
+        if [[ "${ssid,,}" == *"uom.wireless"* ]]; then
+            local aruba_code
+            aruba_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 4 \
+                --no-location "$ARUBA_PROBE_URL" || true)"
+            if [ "$aruba_code" = "204" ] || [ "$aruba_code" = "200" ]; then
+                [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
+                exit 0
+            fi
+            # aruba_code=302 means portal is blocking — fall through to authenticate
+            [ $quiet -eq 0 ] && log "Captive portal detected on ${BOLD}$ssid${RESET}. Authenticating..."
+        else
+            [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
+            exit 0
+        fi
+    else
+        [ $quiet -eq 0 ] && log "Captive portal detected on ${BOLD}$ssid${RESET}. Authenticating..."
     fi
-
-    [ $quiet -eq 0 ] && log "Captive portal detected on ${BOLD}$ssid${RESET}. Authenticating..."
 
     if ! get_credentials; then
         log "${RED}Error: No saved credentials found. Run 'uninet setup' first.${RESET}"
         exit 1
     fi
 
-    # Probe portal to capture redirect URL, final destination, and session cookies
+    # Choose probe URL: Aruba intercepts ubuntu check, Cisco/Ruijie intercept gstatic
+    local active_probe_url="$PROBE_URL"
+    if [[ "${ssid,,}" == *"uom.wireless"* ]]; then
+        active_probe_url="$ARUBA_PROBE_URL"
+    fi
+
+    # Step 1: Probe WITHOUT following redirect to capture the Location header.
+    # This header contains Aruba gateway params: mac, ip, essid, apname, apgroup, url
     rm -f "$COOKIE_JAR"
-    local probe_tmp
+    local probe_tmp probe_headers_tmp redirect_location
     probe_tmp="$(mktemp)"
-    local effective_url
-    effective_url="$(curl -s -k -c "$COOKIE_JAR" -L --max-redirs 5 --connect-timeout 8 -w "%{url_effective}" "$PROBE_URL" -o "$probe_tmp" 2>/dev/null || true)"
-    local probe_output
+    probe_headers_tmp="$(mktemp)"
+    curl -s -k -c "$COOKIE_JAR" --no-location --connect-timeout 8 \
+        -D "$probe_headers_tmp" \
+        "$active_probe_url" -o "$probe_tmp" 2>/dev/null || true
+    redirect_location="$(grep -i '^' "$probe_headers_tmp" 2>/dev/null | \
+        grep -i 'location' | tail -n 1 | awk '{print $2}' | tr -d '\r\n' || true)"
+    rm -f "$probe_tmp" "$probe_headers_tmp"
+
+    # Step 2: Follow the redirect to get the actual portal login form HTML
+    local effective_url probe_output
+    probe_tmp="$(mktemp)"
+    local follow_url="${redirect_location:-$active_probe_url}"
+    effective_url="$(curl -s -k -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+        -L --max-redirs 5 --connect-timeout 8 \
+        -w "%{url_effective}" \
+        "$follow_url" -o "$probe_tmp" 2>/dev/null || true)"
     probe_output="$(cat "$probe_tmp" 2>/dev/null || true)"
     rm -f "$probe_tmp"
 
-    local location_url
-    location_url="$(echo "$probe_output" | grep -i '^Location:' | tail -n 1 | awk '{print $2}' | tr -d '\r\n')"
+    local portal_base_url="${effective_url:-$redirect_location}"
+    portal_base_url="${portal_base_url:-$active_probe_url}"
 
-    local portal_base_url="${effective_url:-$location_url}"
-    portal_base_url="${portal_base_url:-$PROBE_URL}"
+    # Extract Aruba gateway session parameters from the redirect URL query string.
+    # The Aruba controller requires mac, ip, essid, apname, apgroup in the POST.
+    local aruba_mac aruba_ip aruba_essid aruba_apname aruba_apgroup aruba_redir_url
+    local src_url="${redirect_location:-$portal_base_url}"
+    aruba_mac="$(echo "$src_url" | grep -oE '[?&]mac=[^&]+' | head -1 | cut -d= -f2 | sed 's/%3[Aa]/:/g' || true)"
+    aruba_ip="$(echo "$src_url" | grep -oE '[?&]ip=[^&]+' | head -1 | cut -d= -f2 || true)"
+    aruba_essid="$(echo "$src_url" | grep -oE '[?&]essid=[^&]+' | head -1 | cut -d= -f2 | sed 's/%2[Ee]/./g; s/%20/ /g' || true)"
+    aruba_apname="$(echo "$src_url" | grep -oE '[?&]apname=[^&]+' | head -1 | cut -d= -f2 || true)"
+    aruba_apgroup="$(echo "$src_url" | grep -oE '[?&]apgroup=[^&]+' | head -1 | cut -d= -f2 || true)"
+    aruba_redir_url="$(echo "$src_url" | grep -oE '[?&]url=[^&]+' | head -1 | cut -d= -f2 | \
+        sed 's/%3[Aa]/:/g; s/%2[Ff]/\//g; s/%2[Ee]/./g; s/%2[Dd]/-/g' || true)"
 
     # Handle HTML meta-refresh or javascript redirect if present
     local meta_url
@@ -288,14 +332,26 @@ cmd_login() {
     fi
 
     # --- Aruba Networks portal (UoM.Wireless) ---
-    # Portal served by Aruba controller, action: /cgi-bin/login
+    # Portal served by Aruba controller at connect.uom.lk, action: /cgi-bin/login
+    # POST requires: cmd=authenticate, user, password, mac, ip, essid, apname, apgroup, url
     if [[ "$action_url" == *"cgi-bin/login"* ]] || [[ "${ssid,,}" == *"uom.wireless"* ]]; then
+        # Force action URL to Aruba cgi-bin endpoint (always the same for UoM.Wireless)
+        if [[ "$action_url" != *"cgi-bin/login"* ]]; then
+            action_url="https://connect.uom.lk/cgi-bin/login"
+        fi
         if ! [[ "${curl_data[*]}" == *"cmd="* ]]; then
             curl_data+=(--data-urlencode "cmd=authenticate")
         fi
         if ! [[ "${curl_data[*]}" == *"user="* ]]; then
             curl_data+=(--data-urlencode "user=$USERNAME")
         fi
+        # Inject gateway session parameters extracted from redirect URL
+        [ -n "$aruba_mac" ]        && curl_data+=(--data-urlencode "mac=$aruba_mac")
+        [ -n "$aruba_ip" ]         && curl_data+=(--data-urlencode "ip=$aruba_ip")
+        [ -n "$aruba_essid" ]      && curl_data+=(--data-urlencode "essid=$aruba_essid")
+        [ -n "$aruba_apname" ]     && curl_data+=(--data-urlencode "apname=$aruba_apname")
+        [ -n "$aruba_apgroup" ]    && curl_data+=(--data-urlencode "apgroup=$aruba_apgroup")
+        [ -n "$aruba_redir_url" ]  && curl_data+=(--data-urlencode "url=$aruba_redir_url")
         curl_data+=(--data-urlencode "Login=Log In")
         [ $quiet -eq 0 ] && log "Detected Aruba Networks portal (UoM.Wireless). Using cmd=authenticate..."
     fi
