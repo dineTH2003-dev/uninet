@@ -4,19 +4,7 @@ This guide walks you through analyzing how your university's captive portal work
 
 ---
 
-## 1. Quick Capture with UniNet
-
-UniNet includes a built-in diagnostic dump command:
-
-```bash
-uninet test --dump-portal
-```
-
-If a captive portal is detected, this command saves the landing page HTML and HTTP headers into `portal_dump.html` and `portal_headers.json`.
-
----
-
-## 2. Manual Browser DevTools Inspection
+## 1. Manual Browser DevTools Inspection
 
 The most accurate way to understand your portal's authentication flow is using your browser's Developer Tools:
 
@@ -50,7 +38,7 @@ The most accurate way to understand your portal's authentication flow is using y
 
 ---
 
-## 3. Command-Line Inspection with `curl`
+## 2. Command-Line Inspection with `curl`
 
 You can also simulate the redirection flow directly from the terminal:
 
@@ -72,7 +60,7 @@ grep -i -E '<form|<input' campus_login.html
 
 ---
 
-## 4. Common Portal Vendors
+## 3. Common Portal Vendors
 
 Most universities use off-the-shelf commercial network controllers:
 - **Aruba ClearPass**: Often submits to `/cgi-bin/login` or `/guest/portal.php`.

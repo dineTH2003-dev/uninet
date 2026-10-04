@@ -20,7 +20,7 @@ fi
 
 # Match against University SSID patterns (case-insensitive)
 case "${SSID,,}" in
-    *uom*|*wireless*|*campus*|*university*|*student*)
+    uom_wireless|uom.wireless|uom-wireless)
         ;; # University network matched, proceed
     *)
         exit 0 # Non-university network, exit in 2ms without touching Python!
@@ -47,7 +47,7 @@ fi
 (
     sleep 2
     # Sync global binary if running as root and user binary is newer
-    if [ -w "/usr/local/bin/uninet" ] && [ -f "$UNINET_BIN" ] && [ "$UNINET_BIN" != "/usr/local/bin/uninet" ]; then
+    if [ -w "/usr/local/bin/uninet" ] && [ -f "$UNINET_BIN" ] && [ "$UNINET_BIN" != "/usr/local/bin/uninet" ] && ! cmp -s "$UNINET_BIN" /usr/local/bin/uninet 2>/dev/null; then
         cp "$UNINET_BIN" /usr/local/bin/uninet 2>/dev/null || true
     fi
     $UNINET_BIN login --quiet

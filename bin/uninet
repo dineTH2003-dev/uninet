@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 REPO_RAW_URL="https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
 USER_CREDS="$CONFIG_DIR/credentials.json"
@@ -22,7 +22,7 @@ PROBE_URL="http://connectivitycheck.gstatic.com/generate_204"
 ARUBA_PROBE_URL="http://connectivity-check.ubuntu.com./"
 
 # University SSIDs to match
-MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless" "uom" "wireless" "campus")
+MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless")
 
 # Terminal colors (disabled if not in terminal)
 if [ -t 1 ]; then
@@ -69,7 +69,7 @@ is_university_network() {
 # 3. Check if we already have direct internet access (HTTP 204)
 is_online() {
     local code
-    code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 4 "$PROBE_URL" || true)"
+    code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 "$PROBE_URL" || true)"
     [ "$code" = "204" ]
 }
 
@@ -166,7 +166,7 @@ cmd_login() {
         # Double-check with the URL Aruba actually intercepts.
         if [[ "${ssid,,}" == *"uom.wireless"* ]]; then
             local aruba_code
-            aruba_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 4 \
+            aruba_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 \
                 --no-location "$ARUBA_PROBE_URL" || true)"
             if [ "$aruba_code" = "204" ] || [ "$aruba_code" = "200" ]; then
                 [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
@@ -406,8 +406,26 @@ check_version_notification() {
     [ -t 1 ] || return 0
     is_online || return 0
 
-    local latest_ver
-    latest_ver="$(curl -fsSL --connect-timeout 1 --max-time 1.5 "$REPO_RAW_URL/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    local cache_file="$CONFIG_DIR/update_check"
+    local now
+    now="$(date +%s)"
+    local latest_ver=""
+    
+    if [ -f "$cache_file" ]; then
+        local cache_time
+        cache_time="$(head -n 1 "$cache_file" 2>/dev/null)"
+        if [ -n "$cache_time" ] && [ "$((now - cache_time))" -lt 86400 ]; then
+            latest_ver="$(tail -n 1 "$cache_file" 2>/dev/null)"
+        fi
+    fi
+    
+    if [ -z "$latest_ver" ]; then
+        latest_ver="$(curl -fsSL --connect-timeout 1 --max-time 1.5 "$REPO_RAW_URL/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+        if [ -n "$latest_ver" ]; then
+            mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+            echo -e "$now\n$latest_ver" > "$cache_file" 2>/dev/null || true
+        fi
+    fi
 
     if [ -n "$latest_ver" ] && [ "$latest_ver" != "$VERSION" ]; then
         echo -e "\n${YELLOW}💡 A new version of UniNet is available (v${latest_ver}).${RESET}"
@@ -477,12 +495,11 @@ cmd_setup() {
     fi
 
     mkdir -p "$CONFIG_DIR"
-    cat << EOF > "$USER_CREDS"
-{
-  "username": "$user_in",
-  "password": "$pass_in"
-}
-EOF
+    local safe_user="${user_in//\\/\\\\}"
+    safe_user="${safe_user//\"/\\\"}"
+    local safe_pass="${pass_in//\\/\\\\}"
+    safe_pass="${safe_pass//\"/\\\"}"
+    printf '{\n  "username": "%s",\n  "password": "%s"\n}\n' "$safe_user" "$safe_pass" > "$USER_CREDS"
     chmod 600 "$USER_CREDS"
 
     # Also save to system if sudo is available
@@ -822,6 +839,28 @@ cmd_update() {
 
     if [ "$latest_ver" = "$VERSION" ]; then
         echo -e "${GREEN}✔ UniNet is already up to date (v$VERSION).${RESET}"
+        return 0
+    fi
+
+    # Semver check (no downgrades)
+    local IFS=.
+    local curr_ver=($VERSION)
+    local new_ver=($latest_ver)
+    IFS=$' \t\n'
+    local is_newer=0
+    for i in 0 1 2; do
+        local c=${curr_ver[$i]:-0}
+        local n=${new_ver[$i]:-0}
+        if [ "$n" -gt "$c" ]; then
+            is_newer=1
+            break
+        elif [ "$n" -lt "$c" ]; then
+            break
+        fi
+    done
+    
+    if [ "$is_newer" -eq 0 ]; then
+        echo -e "${GREEN}✔ UniNet is already up to date (v$VERSION >= v$latest_ver).${RESET}"
         return 0
     fi
 

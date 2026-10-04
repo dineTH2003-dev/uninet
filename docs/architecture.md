@@ -6,94 +6,68 @@ UniNet is engineered as a lightweight, modular Linux utility that solves a commo
 
 ## 1. Design Principles
 
-1. **Zero Runtime Bloat**: Core connectivity probing, network detection, and CLI logic rely strictly on the Python Standard Library and native Linux utilities (`nmcli`). It does not require bloated GUI runtimes or heavyweight frameworks.
-2. **Distribution Agnostic**: Works on any Linux distribution running NetworkManager (Ubuntu, Fedora, Debian, Arch Linux, openSUSE, etc.).
-3. **Pluggable & Extensible Providers**: The authentication layer is decoupled from network probing. Each university or hardware vendor (Fortinet, Aruba, Cisco, Mikrotik) is treated as a pluggable provider module.
-4. **Security by Default**: Never stores cleartext passwords in configuration files. Integrates with the FreeDesktop Secret Service standard (GNOME Keyring, KWallet, KeePassXC).
-5. **Event-Driven Automation**: Integrates with NetworkManager dispatcher scripts (`/etc/NetworkManager/dispatcher.d/`) to execute only when an interface state changes, consuming zero background RAM when idle.
+1. **Zero Dependencies**: Core connectivity probing, network detection, and CLI logic rely strictly on pure Bash, `curl`, and native Linux utilities (`nmcli`). It does not require bloated GUI runtimes, interpreters like Python, or external packages.
+2. **Distribution Agnostic**: Works on any Linux distribution running NetworkManager (Ubuntu, Fedora, Debian, Arch Linux, openSUSE, etc.) and macOS.
+3. **Event-Driven Automation**: Integrates with NetworkManager dispatcher scripts (`/etc/NetworkManager/dispatcher.d/`) to execute only when an interface state changes, consuming zero background idle CPU.
+4. **Security by Default**: Credentials are stored in simple, permission-restricted JSON files securely managed by the system.
+5. **No Features**: Only addresses existing connectivity/portal issues, strictly without feature creep.
 
 ---
 
-## 2. System Architecture
+## 2. Event-Driven Flow (NetworkManager Dispatcher)
 
-```
-+-------------------------------------------------------------+
-|                         uninet CLI                          |
-|         (status | test | login | logout | config)           |
-+-------------------------------------------------------------+
-                               |
-       +-----------------------+-----------------------+
-       |                                               |
-       v                                               v
-+-------------------------------+             +-------------------------------+
-|     uninet.network            |             |     uninet.portal             |
-|  - Queries nmcli / D-Bus      |             |  - HTTP 204 Probe Engine      |
-|  - Discovers active SSID      |             |  - Detects 302/307 Redirects  |
-|  - Validates campus network   |             |  - Captures Landing URL & HTML|
-+-------------------------------+             +-------------------------------+
-                                                       |
-                                                       v
-+-------------------------------+             +-------------------------------+
-|     uninet.credentials        |             |     uninet.auth (Providers)   |
-|  - FreeDesktop Secret Service |             |  - BaseAuthProvider           |
-|  - File permission fallback   | <---------> |  - GenericFormExtractor       |
-|  - Secure prompt interface    |             |  - University Providers       |
-+-------------------------------+             +-------------------------------+
-```
+UniNet hooks into NetworkManager events to achieve zero idle CPU:
+1. When a network interface state changes, `/etc/NetworkManager/dispatcher.d/99-uninet.sh` is invoked.
+2. The script acts instantly (in ~2ms) via pure Bash substring matching against the active SSID. If it does not match campus networks (e.g. `uom.wireless`), it exits immediately.
+3. If it matches, the script forks into the background, waits for DHCP / routing to settle, and then invokes `uninet login --quiet`.
 
 ---
 
-## 3. Component Details
+## 3. The Two-Step Probe Pattern
 
-### 3.1 Network Detection (`uninet.network`)
-The network detector executes `nmcli -t -f ...` with machine-readable terse delimiters (`:`) to determine:
-- Active Wi-Fi interface (e.g., `wlan0`, `wlp2s0`).
-- Current BSSID, SSID, and signal strength.
-- Device state (`connected`, `connecting`, `disconnected`).
+Captive portals intercept outbound HTTP traffic and respond with redirects or captive pages. UniNet uses a sophisticated two-step probe flow to parse these:
 
-This avoids linking against native C GObject introspection libraries, guaranteeing that UniNet runs seamlessly across Python virtual environments without compiling native extensions.
+### Step 1: No-Follow Probe
+UniNet executes a lightweight `curl` check to an HTTP 204 endpoint (e.g. `http://connectivitycheck.gstatic.com/generate_204` or `http://connectivity-check.ubuntu.com./` for Aruba) **without** following redirects. This allows UniNet to capture the initial `Location` header, which often embeds essential gateway tokens (MAC address, IP, AP Name, etc.).
 
-### 3.2 Captive Portal Detection (`uninet.portal`)
-Captive portals work by intercepting outbound HTTP traffic (port 80) and either:
-1. Returning an **HTTP 302/307 Redirect** to their portal gateway.
-2. Returning an **HTTP 200 OK** with a customized captive HTML page instead of the expected payload.
-3. Hijacking DNS queries.
+### Step 2: Follow Redirect
+UniNet then resolves and follows the captured `Location` URL (or the original probe URL) to fetch the actual HTML content of the captive portal's landing page, complete with session cookies (managed via `/tmp/uninet_cookies_$UID.txt`).
 
-UniNet queries standard probe endpoints:
-- `http://connectivitycheck.gstatic.com/generate_204` (Expects HTTP 204 No Content, zero body).
-- `http://connectivity-check.ubuntu.com/check_network_status.txt` (Expects specific plain text).
+---
 
-If a probe returns a non-204 status code or follows a redirect to an external hostname, UniNet flags the network as `CAPTIVE_PORTAL` and extracts:
-- Redirection history.
-- Portal Landing URL.
-- Query parameters (often containing MAC address, client IP, or session token).
-- Initial HTML payload.
+## 4. Vendor Detection & Payload Injection
 
-### 3.3 Provider Architecture (`uninet.auth`)
-Providers inherit from `BaseAuthProvider`:
-```python
-class BaseAuthProvider(ABC):
-    @abstractmethod
-    def can_handle(self, portal_url: str, html_content: str) -> bool:
-        """Determines if this provider matches the portal."""
-        pass
+UniNet does not rely on abstract classes or providers. It implements inline form extraction and vendor-specific payload injection directly inside `cmd_login`.
 
-    @abstractmethod
-    def login(self, session: requests.Session, credentials: dict) -> AuthResult:
-        """Executes the authentication request flow."""
-        pass
+### Dynamic Form Extraction
+Using `grep` and `sed`, UniNet extracts the form `action` URL and any hidden inputs (`<input type="hidden">`) such as CSRF tokens or session identifiers. It auto-detects `username` and `password` field names based on common conventions.
 
-    @abstractmethod
-    def logout(self, session: requests.Session) -> bool:
-        """Terminates the portal session."""
-        pass
-```
+### Vendor-Specific Injection
+After extraction, UniNet adjusts the POST payload based on detected portal signatures:
+* **Cisco ISE / WebAuth**: Requires an explicit `buttonClicked=4` to bypass interstitial validation.
+* **Aruba Networks**: Uses the `cgi-bin/login` endpoint and demands that session parameters (like `mac`, `ip`, and `essid` obtained during the no-follow probe) are injected.
+* **Ruijie Networks**: Listens on port 8443 and requires form action paths to be normalized from `/index.html` to `/login`.
 
-A `GenericFormExtractor` parses `<form>` elements and hidden CSRF fields for standard university portals that use conventional form submission.
+---
 
-### 3.4 Linux Automation
-1. **NetworkManager Dispatcher**:
-   NetworkManager executes scripts in `/etc/NetworkManager/dispatcher.d/` whenever an interface state changes.
-   When `ACTION="up"` and `CONNECTION_ID` or `SSID` matches the configured campus Wi-Fi, the dispatcher invokes `uninet login`.
-2. **systemd**:
-   A user unit template (`systemd/uninet.service`) is provided for users who prefer standard systemd user timers or systemd-networkd setups.
+## 5. AP Quality Scoring Algorithm
+
+When `uninet optimize` or `uninet scan` is run, UniNet parses `nmcli` scan output and assigns each campus AP a score out of ~1000 points (displayed divided by 10 as out of 100). The formula balances signal strength and bandwidth:
+1. **Signal (350 points max):** Signal percentage linearly mapped (e.g., 100% = 350).
+2. **Band (300 points):** Flat +300 bonus for 5GHz / 6GHz networks, heavily favoring throughput.
+3. **Rate (350 points max):** Advertised PHY rate mapped up to an 866 Mbps ceiling.
+4. **Active Bonus (120 points):** Stability buffer for the currently connected AP to prevent hysteresis/flapping unless a candidate exceeds this ~15-point margin.
+
+---
+
+## 6. Credential Storage
+
+Credentials are saved as plain JSON in `~/.config/uninet/credentials.json` (and `/etc/uninet/credentials.json` for system daemons).
+* **Why plain JSON?** Captive portal portals require plaintext form submission anyway. A complex encryption layer would conflict with the "Zero Dependencies" rule (requiring external tools or daemons like `gnome-keyring` that may not be available in headless contexts).
+* **Security:** Instead of cryptography, security is enforced via strict POSIX file permissions (`chmod 600`), preventing any other user on the system from reading the credentials.
+
+---
+
+## 7. Auto-Connect Priority Mechanism
+
+To ensure the OS prioritizes university Wi-Fi over external networks (e.g. mobile hotspots), `uninet trust` leverages `nmcli` to set `connection.autoconnect-priority 100` for recognized campus SSIDs.
