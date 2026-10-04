@@ -1,5 +1,64 @@
 # ==============================================================================
-    if (Test-Path $LocalAsset) {
+# UniNet - Windows One-Step Turnkey Installer (PowerShell)
+#
+# Usage (Run in PowerShell as Administrator):
+#   Set-ExecutionPolicy Bypass -Scope Process -Force
+#   .\install.ps1
+# ==============================================================================
+
+$ErrorActionPreference = "Stop"
+
+# 1. Target Paths & Source Acquisition
+$InstallDir = "C:\ProgramData\uninet"
+$RepoRawUrl = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
+
+if (-not (Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+}
+
+$ScriptDest = "$InstallDir\uninet.ps1"
+$LocalScript = $null
+
+if ($PSScriptRoot) {
+    $Candidate1 = Join-Path $PSScriptRoot "..\..\bin\uninet.ps1"
+    $Candidate2 = Join-Path $PSScriptRoot "bin\uninet.ps1"
+    if (Test-Path $Candidate1) {
+        $LocalScript = $Candidate1
+    } elseif (Test-Path $Candidate2) {
+        $LocalScript = $Candidate2
+    }
+} elseif (Test-Path ".\bin\uninet.ps1") {
+    $LocalScript = ".\bin\uninet.ps1"
+}
+
+if ($LocalScript) {
+    Copy-Item -Path $LocalScript -Destination $ScriptDest -Force
+} else {
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    } catch { }
+
+    $ReleaseZipUrl = "https://github.com/dineTH2003-dev/uninet/releases/latest/download/uninet-windows.zip"
+    $TempZip = Join-Path ([System.IO.Path]::GetTempPath()) "uninet-windows.zip"
+    $downloadSuccess = $false
+
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent", "UniNet-Installer")
+        $wc.DownloadFile($ReleaseZipUrl, $TempZip)
+        if ((Test-Path $TempZip) -and ((Get-Item $TempZip).Length -gt 1000)) {
+            # Extract flat archive directly to $InstallDir (increments GitHub release download counter)
+            Expand-Archive -Path $TempZip -DestinationPath $InstallDir -Force
+            $downloadSuccess = $true
+        }
+        Remove-Item -Path $TempZip -Force -ErrorAction SilentlyContinue
+    } catch { }
+
+    if (-not $downloadSuccess -or -not (Test-Path $ScriptDest)) {
+        # Fallback to raw repository script
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("User-Agent", "UniNet-Installer")
+        $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $ScriptDest)
     }
 }
 
@@ -75,4 +134,3 @@ Remove-Item $TempXml -Force -ErrorAction SilentlyContinue
 
 # 3. Launch interactive credentials setup in a dedicated PowerShell process
 & powershell.exe -ExecutionPolicy Bypass -NoProfile -File "$ScriptDest" setup
-

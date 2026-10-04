@@ -17,12 +17,12 @@ param (
     [switch]$Quiet
 )
 
-$Version = "1.0.6"
+$Version = "1.2.0"
 $RepoRawUrl = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 $ConfigDir = "$env:APPDATA\uninet"
 $CredsFile = "$ConfigDir\credentials.json"
 $ProbeUrl = "http://connectivitycheck.gstatic.com/generate_204"
-$MatchPatterns = @("uom_wireless", "uom.wireless", "uom-wireless", "uom", "wireless", "campus")
+$MatchPatterns = @("uom_wireless", "uom.wireless", "uom-wireless")
 
 function Write-UniLog([string]$Message, [string]$Color = "Cyan") {
     if (-not $Quiet) {
