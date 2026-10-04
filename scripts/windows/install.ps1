@@ -8,6 +8,11 @@
 
 $ErrorActionPreference = "Stop"
 
+# Enable RemoteSigned for CurrentUser so PowerShell scripts can execute seamlessly
+try {
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction SilentlyContinue
+} catch { }
+
 # 1. Target Paths & Source Acquisition
 $InstallDir = "C:\ProgramData\uninet"
 $RepoRawUrl = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
@@ -16,8 +21,12 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-$ScriptDest = "$InstallDir\uninet.ps1"
+# Use uninet_core.ps1 for the engine so PowerShell CLI doesn't conflict with ExecutionPolicy
+$ScriptDest = "$InstallDir\uninet_core.ps1"
 $LocalScript = $null
+
+# Clean up legacy uninet.ps1 from InstallDir if present
+Remove-Item "$InstallDir\uninet.ps1" -Force -ErrorAction SilentlyContinue
 
 if ($PSScriptRoot) {
     $Candidate1 = Join-Path $PSScriptRoot "..\..\bin\uninet.ps1"
@@ -38,31 +47,16 @@ if ($LocalScript) {
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
     } catch { }
 
-    $ReleaseZipUrl = "https://github.com/dineTH2003-dev/uninet/releases/latest/download/uninet-windows.zip"
-    $TempZip = Join-Path ([System.IO.Path]::GetTempPath()) "uninet-windows.zip"
-    $downloadSuccess = $false
-
-    try {
-        $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add("User-Agent", "UniNet-Installer")
-        $wc.DownloadFile($ReleaseZipUrl, $TempZip)
-        if ((Test-Path $TempZip) -and ((Get-Item $TempZip).Length -gt 1000)) {
-            # Extract flat archive directly to $InstallDir (increments GitHub release download counter)
-            Expand-Archive -Path $TempZip -DestinationPath $InstallDir -Force
-            $downloadSuccess = $true
-        }
-        Remove-Item -Path $TempZip -Force -ErrorAction SilentlyContinue
-    } catch { }
-
-    if (-not $downloadSuccess -or -not (Test-Path $ScriptDest)) {
-        # Fallback to raw repository script
-        $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add("User-Agent", "UniNet-Installer")
-        $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $ScriptDest)
-    }
+    # Fetch latest engine directly from repository main branch
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add("User-Agent", "UniNet-Installer")
+    $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $ScriptDest)
 }
 
-# Create uninet.cmd wrapper so users can type 'uninet' in CMD or PowerShell
+# Unblock downloaded file to satisfy Windows Defender / SmartScreen
+Unblock-File "$ScriptDest" -ErrorAction SilentlyContinue
+
+# Create uninet.cmd wrapper so users can type 'uninet' in CMD or PowerShell with automatic ExecutionPolicy Bypass
 $CmdDest = "$InstallDir\uninet.cmd"
 $CmdContent = "@echo off`r`npowershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$ScriptDest`" %*"
 [System.IO.File]::WriteAllText($CmdDest, $CmdContent)
@@ -132,5 +126,5 @@ $TempXml = "$env:TEMP\uninet_task.xml"
 $createResult = cmd.exe /c "schtasks /create /tn `"$TaskName`" /xml `"$TempXml`" /f >nul 2>nul"
 Remove-Item $TempXml -Force -ErrorAction SilentlyContinue
 
-# 3. Launch interactive credentials setup in a dedicated PowerShell process
+# 3. Launch interactive credentials setup in a dedicated PowerShell process with Bypass
 & powershell.exe -ExecutionPolicy Bypass -NoProfile -File "$ScriptDest" setup
