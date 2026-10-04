@@ -49,13 +49,8 @@ curl -fsSL https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/install.
 ### 🪟 Windows (Windows 10 & 11)
 Open **PowerShell as Administrator** and run:
 ```powershell
-irm https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/scripts/windows/install.ps1 | iex
+Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/scripts/windows/install.ps1 | iex
 ```
-> **Tip**: If your Windows system restricts running PowerShell scripts, you can run this one-liner which automatically bypasses execution restrictions:
-> ```powershell
-> Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force; irm https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/scripts/windows/install.ps1 | iex
-> ```
-
 - **Native & Dependency-Free**: 100% pure PowerShell. No Python or extra software required.
 - **ExecutionPolicy Bypass Wrapper**: Creates `uninet.cmd` so `uninet` works out of the box in both Command Prompt and PowerShell without execution policy warnings.
 - **Event-Driven**: Registers a Windows Task Scheduler hook for `WLAN-AutoConfig` Event 8001 (triggers instantly on Wi-Fi connection with 0% idle CPU).
@@ -201,7 +196,7 @@ curl -fsSL https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/uninstal
 
 **🪟 Windows (PowerShell as Administrator)**:
 ```powershell
-irm https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/scripts/windows/uninstall.ps1 | iex
+Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/scripts/windows/uninstall.ps1 | iex
 ```
 
 ---
