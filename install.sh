@@ -242,16 +242,6 @@ elif [ "$PLATFORM" = "macos" ]; then
     fi
 fi
 
-# ── 6. Install Logo Asset ──────────────────────────────────────────────────
-if [ -f "$SCRIPT_DIR/assets/uom_logo.ans" ]; then
-    if sudo mkdir -p "/usr/local/share/uninet" 2>/dev/null \
-       && sudo cp "$SCRIPT_DIR/assets/uom_logo.ans" "/usr/local/share/uninet/uom_logo.ans" 2>/dev/null; then
-        : # ok silently
-    else
-        mkdir -p "$HOME/.config/uninet"
-        cp "$SCRIPT_DIR/assets/uom_logo.ans" "$HOME/.config/uninet/uom_logo.ans" 2>/dev/null || true
-    fi
-fi
 
 # ── 7. Set Wi-Fi Auto-Connect Priority ────────────────────────────────────
 echo ""
