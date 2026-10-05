@@ -2,40 +2,49 @@
 # UniNet - Windows One-Step Turnkey Installer (PowerShell)
 #
 # Usage (Run in PowerShell as Administrator):
-#   Set-ExecutionPolicy Bypass -Scope Process -Force
-#   .\install.ps1
+#   irm https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/scripts/windows/install.ps1 | iex
 # ==============================================================================
 
-$ErrorActionPreference = "Stop"
+# FIX 6: Use Continue — risky steps wrapped in try/catch, no silent crash on first error
+$ErrorActionPreference = "Continue"
 
-# Enable RemoteSigned for CurrentUser so PowerShell scripts can execute seamlessly
+# FIX 8: Enable TLS 1.2/1.3 immediately — required for GitHub HTTPS on Windows 7/8/PS3/PS4
+try {
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor 3072 -bor 12288
+} catch {
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls
+    } catch { }
+}
+
+# Set CurrentUser execution policy so installed scripts run without extra prompts
 try {
     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction SilentlyContinue
 } catch { }
 
-# 1. Target Paths & Source Acquisition
-$InstallDir = "C:\ProgramData\uninet"
-$RepoRawUrl = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
+# ---------------------------------------------------------------------------
+# 1. Paths & Source Acquisition
+# ---------------------------------------------------------------------------
+$InstallDir  = "C:\ProgramData\uninet"
+$RepoRawUrl  = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
+$ReleaseZip  = "https://github.com/dineTH2003-dev/uninet/releases/latest/download/uninet-windows.zip"
+$ScriptDest  = "$InstallDir\uninet_core.ps1"
 
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-# Use uninet_core.ps1 for the engine so PowerShell CLI doesn't conflict with ExecutionPolicy
-$ScriptDest = "$InstallDir\uninet_core.ps1"
+# FIX 9: Remove legacy uninet_silent.vbs if present from old installs
+Remove-Item "$InstallDir\uninet.ps1"       -Force -ErrorAction SilentlyContinue
+Remove-Item "$InstallDir\uninet_silent.vbs" -Force -ErrorAction SilentlyContinue
+
+# Check if running from a local clone (dev workflow)
 $LocalScript = $null
-
-# Clean up legacy uninet.ps1 from InstallDir if present
-Remove-Item "$InstallDir\uninet.ps1" -Force -ErrorAction SilentlyContinue
-
 if ($PSScriptRoot) {
-    $Candidate1 = Join-Path $PSScriptRoot "..\..\bin\uninet.ps1"
-    $Candidate2 = Join-Path $PSScriptRoot "bin\uninet.ps1"
-    if (Test-Path $Candidate1) {
-        $LocalScript = $Candidate1
-    } elseif (Test-Path $Candidate2) {
-        $LocalScript = $Candidate2
-    }
+    $c1 = Join-Path $PSScriptRoot "..\..\bin\uninet.ps1"
+    $c2 = Join-Path $PSScriptRoot "bin\uninet.ps1"
+    if (Test-Path $c1) { $LocalScript = $c1 }
+    elseif (Test-Path $c2) { $LocalScript = $c2 }
 } elseif (Test-Path ".\bin\uninet.ps1") {
     $LocalScript = ".\bin\uninet.ps1"
 }
@@ -43,25 +52,81 @@ if ($PSScriptRoot) {
 if ($LocalScript) {
     Copy-Item -Path $LocalScript -Destination $ScriptDest -Force
 } else {
-    try {
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-    } catch { }
+    $downloaded = $false
 
-    # Fetch latest engine directly from repository main branch
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("User-Agent", "UniNet-Installer")
-    $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $ScriptDest)
+    # Strategy 1: Direct raw file download — fastest, always latest
+    if (-not $downloaded) {
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add("User-Agent", "UniNet-Windows-Installer")
+            $wc.DownloadFile("$RepoRawUrl/bin/uninet.ps1", $ScriptDest)
+            if ((Test-Path $ScriptDest) -and ((Get-Item $ScriptDest).Length -gt 500)) {
+                $downloaded = $true
+            }
+        } catch { }
+    }
+
+    # Strategy 2: Invoke-WebRequest with explicit headers
+    if (-not $downloaded) {
+        try {
+            $headers = @{ "User-Agent" = "UniNet-Windows-Installer" }
+            Invoke-WebRequest -Uri "$RepoRawUrl/bin/uninet.ps1" -OutFile $ScriptDest `
+                -Headers $headers -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            if ((Test-Path $ScriptDest) -and ((Get-Item $ScriptDest).Length -gt 500)) {
+                $downloaded = $true
+            }
+        } catch { }
+    }
+
+    # Strategy 3: Invoke-RestMethod stream
+    if (-not $downloaded) {
+        try {
+            $headers   = @{ "User-Agent" = "UniNet-Windows-Installer" }
+            $rawScript = Invoke-RestMethod -Uri "$RepoRawUrl/bin/uninet.ps1" `
+                -Headers $headers -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            if ($rawScript -and $rawScript.Length -gt 500) {
+                Set-Content -Path $ScriptDest -Value $rawScript -Encoding UTF8
+                $downloaded = $true
+            }
+        } catch { }
+    }
+
+    # Strategy 4: Release zip archive extraction
+    if (-not $downloaded) {
+        $tempZip = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "uninet-win.zip")
+        try {
+            Invoke-WebRequest -Uri $ReleaseZip -OutFile $tempZip -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            if ((Test-Path $tempZip) -and ((Get-Item $tempZip).Length -gt 500)) {
+                Expand-Archive -Path $tempZip -DestinationPath $InstallDir -Force
+                if (Test-Path "$InstallDir\uninet.ps1") {
+                    Move-Item -Path "$InstallDir\uninet.ps1" -Destination $ScriptDest -Force
+                    $downloaded = $true
+                }
+            }
+        } catch { }
+        Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not $downloaded -or -not (Test-Path $ScriptDest)) {
+        Write-Error "Failed to install UniNet engine. Please check your internet connection."
+        exit 1
+    }
 }
 
-# Unblock downloaded file to satisfy Windows Defender / SmartScreen
+# Unblock downloaded file so SmartScreen / Defender don't flag the Mark of the Web
 Unblock-File "$ScriptDest" -ErrorAction SilentlyContinue
 
-# Create uninet.cmd wrapper so users can type 'uninet' in CMD or PowerShell with automatic ExecutionPolicy Bypass
-$CmdDest = "$InstallDir\uninet.cmd"
+# ---------------------------------------------------------------------------
+# 2. Create uninet.cmd wrapper — allows typing 'uninet' in CMD or PowerShell
+# ---------------------------------------------------------------------------
+$CmdDest    = "$InstallDir\uninet.cmd"
 $CmdContent = "@echo off`r`npowershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$ScriptDest`" %*"
-[System.IO.File]::WriteAllText($CmdDest, $CmdContent)
+Set-Content -Path $CmdDest -Value $CmdContent -Encoding ASCII
+Unblock-File "$CmdDest" -ErrorAction SilentlyContinue
 
-# Add to system/user PATH
+# ---------------------------------------------------------------------------
+# 3. Add InstallDir to PATH (Machine scope, fall back to User scope)
+# ---------------------------------------------------------------------------
 $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 if ($MachinePath -notlike "*$InstallDir*") {
     try {
@@ -76,20 +141,19 @@ if ($MachinePath -notlike "*$InstallDir*") {
     }
 }
 
-# Create uninet_silent.vbs so background task execution is 100% invisible (no console popup)
-$VbsDest = "$InstallDir\uninet_silent.vbs"
-$VbsContent = "Set WshShell = CreateObject(""WScript.Shell"")`r`nWshShell.Run ""powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -WindowStyle Hidden -File """""" & WScript.Arguments(0) & """""" login -Quiet"", 0, False"
-[System.IO.File]::WriteAllText($VbsDest, $VbsContent, [System.Text.Encoding]::ASCII)
+# ---------------------------------------------------------------------------
+# 4. Register Windows Task Scheduler — triggers on Wi-Fi connect (Event 8001)
+# FIX 9: Direct powershell.exe with <Hidden>true</Hidden> — no VBScript launcher
+# FIX 7: Task Scheduler reads credentials from C:\ProgramData\uninet\credentials.json
+# ---------------------------------------------------------------------------
+$TaskName  = "UniNetAutoConnect"
+$Action    = "powershell.exe"
+$Arguments = "-ExecutionPolicy Bypass -NoProfile -NonInteractive -WindowStyle Hidden -File `"$ScriptDest`" login -Quiet"
 
-# 2. Register Windows Task Scheduler trigger on Wi-Fi Connection (Event 8001)
-$TaskName = "UniNetAutoConnect"
-$Action = "wscript.exe"
-$Arguments = "//B //Nologo `"$VbsDest`" `"$ScriptDest`""
-
-# Safely unregister old task if present (using cmd /c to completely isolate NativeCommandError)
+# Remove old task silently
 $null = cmd.exe /c "schtasks /delete /tn `"$TaskName`" /f >nul 2>nul"
 
-# XML trigger for WLAN-AutoConfig Event 8001 (Connection Succeeded)
+# XML-based task — triggers on WLAN-AutoConfig Event 8001 (Wi-Fi Connection Succeeded)
 $TaskXml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -110,6 +174,7 @@ $TaskXml = @"
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
+    <Hidden>true</Hidden>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -121,10 +186,11 @@ $TaskXml = @"
 "@
 
 $TempXml = "$env:TEMP\uninet_task.xml"
-[System.IO.File]::WriteAllText($TempXml, $TaskXml, [System.Text.Encoding]::Unicode)
-
-$createResult = cmd.exe /c "schtasks /create /tn `"$TaskName`" /xml `"$TempXml`" /f >nul 2>nul"
+Set-Content -Path $TempXml -Value $TaskXml -Encoding Unicode
+$null = cmd.exe /c "schtasks /create /tn `"$TaskName`" /xml `"$TempXml`" /f >nul 2>nul"
 Remove-Item $TempXml -Force -ErrorAction SilentlyContinue
 
-# 3. Launch interactive credentials setup in a dedicated PowerShell process with Bypass
+# ---------------------------------------------------------------------------
+# 5. Launch interactive setup in a fresh PowerShell process
+# ---------------------------------------------------------------------------
 & powershell.exe -ExecutionPolicy Bypass -NoProfile -File "$ScriptDest" setup

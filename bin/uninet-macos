@@ -12,14 +12,14 @@
 
 set -eo pipefail
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 REPO_RAW_URL="https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
 USER_CREDS="$CONFIG_DIR/credentials.json"
 COOKIE_JAR="/tmp/uninet_cookies_$UID.txt"
 PROBE_URL="http://connectivitycheck.gstatic.com/generate_204"
 
-MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless" "uom" "wireless" "campus")
+MATCH_PATTERNS=("uom_wireless" "uom.wireless" "uom-wireless")
 
 # Terminal colors
 if [ -t 1 ]; then
@@ -57,7 +57,8 @@ get_active_ssid() {
 # 3. Check if SSID matches university patterns
 is_university_network() {
     local ssid="$1"
-    local ssid_lower="${ssid,,}"
+    local ssid_lower
+    ssid_lower="$(echo "$ssid" | tr '[:upper:]' '[:lower:]')"
     for pat in "${MATCH_PATTERNS[@]}"; do
         if [[ "$ssid_lower" == *"$pat"* ]]; then
             return 0
@@ -266,7 +267,9 @@ cmd_login() {
     fi
 
     # --- Aruba Networks portal (UoM.Wireless) ---
-    if [[ "$action_url" == *"cgi-bin/login"* ]] || [[ "${ssid,,}" == *"uom.wireless"* ]]; then
+    local ssid_lower
+    ssid_lower="$(echo "$ssid" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$action_url" == *"cgi-bin/login"* ]] || [[ "$ssid_lower" == *"uom.wireless"* ]]; then
         if ! [[ "${curl_data[*]}" == *"cmd="* ]]; then
             curl_data+=(--data-urlencode "cmd=authenticate")
         fi
@@ -278,7 +281,7 @@ cmd_login() {
     fi
 
     # --- Ruijie Networks portal (UoM-Wireless) ---
-    if [[ "$action_url" == *":8443"* ]] || [[ "$portal_base_url" == *":8443"* ]] || [[ "${ssid,,}" == *"uom-wireless"* ]]; then
+    if [[ "$action_url" == *":8443"* ]] || [[ "$portal_base_url" == *":8443"* ]] || [[ "$ssid_lower" == *"uom-wireless"* ]]; then
         if [[ "$action_url" == *"/index.html"* ]]; then
             action_url="${action_url%/index.html}/login"
         elif [[ "$action_url" == *"connect.uom.lk:8443" ]] || [[ "$action_url" == *"connect.uom.lk:8443/" ]]; then

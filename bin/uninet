@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 REPO_RAW_URL="https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/uninet"
 USER_CREDS="$CONFIG_DIR/credentials.json"
