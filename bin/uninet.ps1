@@ -22,7 +22,7 @@ param (
 # ---------------------------------------------------------------------------
 $ErrorActionPreference = "Continue"
 
-$Version = "1.2.2"
+$Version = "1.2.3"
 $RepoRawUrl     = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 $ConfigDir      = "$env:APPDATA\uninet"
 $CredsFile      = "$ConfigDir\credentials.json"
@@ -75,18 +75,38 @@ function Write-UniLog([string]$Message, [string]$Color = "Cyan") {
 # FIX 10: Locale-safe SSID extraction — netsh labels change in non-English Windows
 # ---------------------------------------------------------------------------
 function Get-ActiveSSID {
-    # Method 1: netsh (works on English + most Western locales)
+    # Method 1: Get-NetConnectionProfile — FASTEST, locale-independent, works without Location API
     try {
-        $lines = netsh wlan show interfaces 2>$null
-        # Match line containing "SSID" but NOT "BSSID" — works even if label differs slightly
-        foreach ($line in $lines) {
-            if ($line -match '^\s*SSID\s*:' -and $line -notmatch 'BSSID') {
-                return ($line -split ':', 2)[1].Trim()
+        $profiles = Get-NetConnectionProfile -ErrorAction SilentlyContinue
+        foreach ($p in $profiles) {
+            if ($p.Name -and (Test-UniversityNetwork $p.Name)) {
+                return $p.Name
             }
         }
     } catch { }
 
-    # Method 2: WMI — locale-independent, works on any Windows language
+    # Method 2: netsh wlan show interfaces
+    try {
+        $lines = netsh wlan show interfaces 2>$null
+        foreach ($line in $lines) {
+            if ($line -match '^\s*SSID\s*:' -and $line -notmatch 'BSSID') {
+                $val = ($line -split ':', 2)[1].Trim()
+                if ($val) { return $val }
+            }
+        }
+    } catch { }
+
+    # Method 3: Any active Wi-Fi profile from Get-NetConnectionProfile
+    try {
+        $profiles = Get-NetConnectionProfile -ErrorAction SilentlyContinue
+        foreach ($p in $profiles) {
+            if ($p.InterfaceAlias -match 'Wi-?Fi|Wireless|WLAN' -and $p.Name) {
+                return $p.Name
+            }
+        }
+    } catch { }
+
+    # Method 4: WMI fallback
     try {
         $adapters = Get-WmiObject -Class Win32_NetworkAdapter -Filter "NetConnectionStatus=2" -ErrorAction SilentlyContinue
         foreach ($a in $adapters) {
@@ -95,16 +115,6 @@ function Get-ActiveSSID {
                            Where-Object { $_ -match 'SSID' -and $_ -notmatch 'BSSID' } |
                            Select-Object -First 1
                 if ($ssidRaw) { return ($ssidRaw -split ':', 2)[1].Trim() }
-            }
-        }
-    } catch { }
-
-    # Method 3: Get-NetConnectionProfile — PS3+ Windows 8+
-    try {
-        $profiles = Get-NetConnectionProfile -ErrorAction SilentlyContinue
-        foreach ($p in $profiles) {
-            if ($p.InterfaceAlias -match 'Wi-?Fi|Wireless|WLAN') {
-                return $p.Name
             }
         }
     } catch { }
@@ -361,43 +371,48 @@ function Get-QueryParam([string]$Url, [string]$Name) {
 # CORE LOGIN — FIX 2, 3, 4, 5 applied here
 # ===========================================================================
 function Invoke-UniLogin {
-    # --- Wait for SSID + verify university network ---
-    $ssid = ""
-    for ($i = 0; $i -lt 5; $i++) {
-        $ssid = Get-ActiveSSID
-        if ($ssid -and (Test-UniversityNetwork $ssid)) { break }
-        Start-Sleep -Seconds 1
+    # --- Step 1: Detect active Wi-Fi or auto-connect to campus network ---
+    $ssid = Get-ActiveSSID
+
+    # If not connected or on non-campus network, proactively scan and connect!
+    if ([string]::IsNullOrWhiteSpace($ssid) -or -not (Test-UniversityNetwork $ssid)) {
+        Write-UniLog "Checking for available campus Wi-Fi networks..." "Cyan"
+        $campus = Get-CampusNetworks "campus"
+        if ($campus -and $campus.Count -gt 0) {
+            $best = $campus[0]
+            Write-UniLog "Detected campus network '$($best.SSID)' (Signal: $($best.Signal)). Connecting..." "Green"
+            $null = cmd.exe /c "netsh wlan connect name=`"$($best.SSID)`""
+            # Wait up to 10 seconds for association
+            for ($wait = 0; $wait -lt 10; $wait++) {
+                Start-Sleep -Seconds 1
+                $ssid = Get-ActiveSSID
+                if ($ssid -and (Test-UniversityNetwork $ssid)) { break }
+            }
+        }
     }
 
     if ([string]::IsNullOrWhiteSpace($ssid)) {
-        Write-UniLog "No active Wi-Fi connection detected." "Gray"
+        Write-UniLog "No active Wi-Fi connection detected and no campus network in range." "Gray"
         return
     }
+
     if (-not (Test-UniversityNetwork $ssid)) {
         Write-UniLog "Connected to non-university Wi-Fi ($ssid). Exiting." "Gray"
         return
     }
 
-    # Allow DHCP stack to settle
-    Start-Sleep -Seconds 2
-
-    # --- FIX 3: Aruba-aware online check ---
-    if (Test-IsOnline) {
-        if ($ssid -imatch 'uom\.wireless') {
-            # gstatic is whitelisted by Aruba — confirm with secondary probe
-            if (Test-ArubaOnline) {
-                Write-UniLog "Already connected to the internet on $ssid." "Green"
-                return
-            }
-            # ArubaOnline returned false → portal is still blocking → fall through to auth
-            Write-UniLog "Captive portal detected on $ssid (Aruba). Authenticating..." "Yellow"
-        } else {
-            Write-UniLog "Already connected to the internet on $ssid." "Green"
-            return
-        }
-    } else {
-        Write-UniLog "Captive portal detected on $ssid. Authenticating..." "Yellow"
+    # --- Step 2: Wait for DHCP lease and default gateway (up to 8s) ---
+    Write-UniLog "Verifying network gateway on $ssid..." "Cyan"
+    for ($w = 0; $w -lt 8; $w++) {
+        $hasRoute = $false
+        try {
+            $routes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+            if ($routes) { $hasRoute = $true; break }
+        } catch { }
+        Start-Sleep -Seconds 1
     }
+    # Buffer for DNS resolution to initialize
+    Start-Sleep -Seconds 1
 
     $creds = Get-SavedCredentials
     if (-not $creds) {
@@ -405,145 +420,158 @@ function Invoke-UniLogin {
         return
     }
 
-    # Choose starting probe URL — Aruba intercepts ubuntu check, Cisco/Ruijie intercept gstatic
-    $activeProbeUrl = if ($ssid -imatch 'uom\.wireless') { $ArubaProbeUrl } else { $ProbeUrl }
+    # --- Step 3: Portal Probe and Authentication with Retry Loop ---
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        # Check if already online
+        if (Test-IsOnline) {
+            if ($ssid -imatch 'uom\.wireless') {
+                if (Test-ArubaOnline) {
+                    Write-UniLog "Already connected to the internet on $ssid." "Green"
+                    return
+                }
+                Write-UniLog "Captive portal detected on $ssid (Aruba). Authenticating..." "Yellow"
+            } else {
+                Write-UniLog "Already connected to the internet on $ssid." "Green"
+                return
+            }
+        } else {
+            Write-UniLog "Captive portal detected on $ssid (Attempt $attempt/$maxAttempts). Authenticating..." "Yellow"
+        }
 
-    # FIX 5: Persistent cookie jar — shared across ALL requests in this login session
-    $cookieJar = New-Object System.Net.CookieContainer
+        # Choose starting probe URL
+        $activeProbeUrl = if ($ssid -imatch 'uom\.wireless') { $ArubaProbeUrl } else { $ProbeUrl }
 
-    # --- FIX 2, STEP 1: Probe WITHOUT redirect — capture Location header ---
-    # The Location header from captive portals contains session params (mac, ip, essid, etc.)
-    $probe1 = Invoke-NoFollowProbe -Uri $activeProbeUrl -CookieJar $cookieJar
-    $locationHeader = $probe1.Location
+        # Persistent cookie jar
+        $cookieJar = New-Object System.Net.CookieContainer
 
-    # Extract Aruba gateway session parameters from the redirect URL
-    # The Aruba controller embeds mac, ip, essid, apname, apgroup in the Location query string
-    $arubaMac      = ""
-    $arubaIp       = ""
-    $arubaEssid    = ""
-    $arubaApname   = ""
-    $arubaApgroup  = ""
-    $arubaRedirUrl = ""
+        # STEP 1: Probe WITHOUT redirect to capture Location header and gateway params
+        $probe1 = Invoke-NoFollowProbe -Uri $activeProbeUrl -CookieJar $cookieJar
+        $locationHeader = $probe1.Location
 
-    $srcUrl = if ($locationHeader) { $locationHeader } else { $activeProbeUrl }
-    if ($srcUrl -match '\?') {
-        $arubaMac      = Get-QueryParam -Url $srcUrl -Name "mac"
-        # Aruba encodes colons in MAC as %3A
-        $arubaMac      = $arubaMac -replace '%3[Aa]', ':'
-        $arubaIp       = Get-QueryParam -Url $srcUrl -Name "ip"
-        $arubaEssid    = Get-QueryParam -Url $srcUrl -Name "essid"
-        $arubaApname   = Get-QueryParam -Url $srcUrl -Name "apname"
-        $arubaApgroup  = Get-QueryParam -Url $srcUrl -Name "apgroup"
-        $arubaRedirUrl = Get-QueryParam -Url $srcUrl -Name "url"
-    }
+        # Extract Aruba gateway session parameters
+        $arubaMac      = ""
+        $arubaIp       = ""
+        $arubaEssid    = ""
+        $arubaApname   = ""
+        $arubaApgroup  = ""
+        $arubaRedirUrl = ""
 
-    # --- FIX 2, STEP 2: Follow redirects to landing page, get form HTML ---
-    $followUrl = if ($locationHeader) { $locationHeader } else { $activeProbeUrl }
-    $probe2    = Invoke-FollowProbe -Uri $followUrl -CookieJar $cookieJar
-    $formHtml  = $probe2.Body
-    $portalBaseUrl = $probe2.EffectiveUrl
-    if ([string]::IsNullOrWhiteSpace($portalBaseUrl)) { $portalBaseUrl = $followUrl }
+        $srcUrl = if ($locationHeader) { $locationHeader } else { $activeProbeUrl }
+        if ($srcUrl -match '\?') {
+            $arubaMac      = Get-QueryParam -Url $srcUrl -Name "mac"
+            $arubaMac      = $arubaMac -replace '%3[Aa]', ':'
+            $arubaIp       = Get-QueryParam -Url $srcUrl -Name "ip"
+            $arubaEssid    = Get-QueryParam -Url $srcUrl -Name "essid"
+            $arubaApname   = Get-QueryParam -Url $srcUrl -Name "apname"
+            $arubaApgroup  = Get-QueryParam -Url $srcUrl -Name "apgroup"
+            $arubaRedirUrl = Get-QueryParam -Url $srcUrl -Name "url"
+        }
 
-    # Handle HTML meta-refresh redirect if portal uses it
-    if ($formHtml -match '(?i)<meta[^>]+http-equiv=["\x27]refresh["\x27][^>]*url=([^">\x27\s]+)') {
-        $metaUrl = $matches[1].Trim('"', "'")
-        $resolved = Resolve-PortalUrl -Base $portalBaseUrl -Target $metaUrl
-        if ($resolved -and $resolved -ne $portalBaseUrl) {
-            $probe3 = Invoke-FollowProbe -Uri $resolved -CookieJar $cookieJar
-            if ($probe3.Body) {
-                $formHtml      = $probe3.Body
-                $portalBaseUrl = $probe3.EffectiveUrl
+        # STEP 2: Follow redirects to landing page, get form HTML
+        $followUrl = if ($locationHeader) { $locationHeader } else { $activeProbeUrl }
+        $probe2    = Invoke-FollowProbe -Uri $followUrl -CookieJar $cookieJar
+        $formHtml  = $probe2.Body
+        $portalBaseUrl = $probe2.EffectiveUrl
+        if ([string]::IsNullOrWhiteSpace($portalBaseUrl)) { $portalBaseUrl = $followUrl }
+
+        # Handle HTML meta-refresh redirect if present
+        if ($formHtml -match '(?i)<meta[^>]+http-equiv=["\x27]refresh["\x27][^>]*url=([^">\x27\s]+)') {
+            $metaUrl = $matches[1].Trim('"', "'")
+            $resolved = Resolve-PortalUrl -Base $portalBaseUrl -Target $metaUrl
+            if ($resolved -and $resolved -ne $portalBaseUrl) {
+                $probe3 = Invoke-FollowProbe -Uri $resolved -CookieJar $cookieJar
+                if ($probe3.Body) {
+                    $formHtml      = $probe3.Body
+                    $portalBaseUrl = $probe3.EffectiveUrl
+                }
             }
         }
-    }
 
-    # --- FIX 4, STEP 3: Parse HTML form — extract action URL and hidden fields ---
-    $rawAction = Get-FormActionUrl -Html $formHtml
-    $actionUrl = Resolve-PortalUrl -Base $portalBaseUrl -Target $rawAction
-    if ([string]::IsNullOrWhiteSpace($actionUrl)) { $actionUrl = $portalBaseUrl }
+        # STEP 3: Parse HTML form action and hidden fields
+        $rawAction = Get-FormActionUrl -Html $formHtml
+        $actionUrl = Resolve-PortalUrl -Base $portalBaseUrl -Target $rawAction
+        if ([string]::IsNullOrWhiteSpace($actionUrl)) { $actionUrl = $portalBaseUrl }
 
-    # Start payload with all hidden form fields (CSRF tokens, session IDs, etc.)
-    $postBody = Get-HiddenFormFields -Html $formHtml
+        $postBody = Get-HiddenFormFields -Html $formHtml
 
-    # --- FIX 4, STEP 4: Smart credential injection — read actual field names from HTML ---
-    $hasUsernameField = $formHtml -imatch 'name=["\x27]?username'
-    $hasUserField     = $formHtml -imatch 'name=["\x27]?user["\x27\s>]'
-    $hasPasswordField = $formHtml -imatch 'name=["\x27]?password'
-    $hasPassField     = $formHtml -imatch 'name=["\x27]?pass["\x27\s>]'
+        # STEP 4: Credential injection
+        $hasUsernameField = $formHtml -imatch 'name=["\x27]?username'
+        $hasUserField     = $formHtml -imatch 'name=["\x27]?user["\x27\s>]'
+        $hasPasswordField = $formHtml -imatch 'name=["\x27]?password'
+        $hasPassField     = $formHtml -imatch 'name=["\x27]?pass["\x27\s>]'
 
-    if ($hasUsernameField) { $postBody["username"] = $creds.username }
-    if ($hasUserField)     { $postBody["user"]     = $creds.username }
-    # Fallback: inject both if neither detected
-    if (-not $hasUsernameField -and -not $hasUserField) {
-        $postBody["username"] = $creds.username
-        $postBody["user"]     = $creds.username
-    }
-
-    if ($hasPasswordField)          { $postBody["password"] = $creds.password }
-    elseif ($hasPassField)          { $postBody["pass"]     = $creds.password }
-    else                            { $postBody["password"] = $creds.password }
-
-    # --- FIX 4, STEP 5: Vendor-specific payload injection ---
-
-    # --- Cisco / NEC WebAuth (UoM_Wireless) ---
-    # The Cisco portal's loginscript.js requires buttonClicked=4 to be accepted.
-    # Without it, the form is treated as a cancel action.
-    if ($actionUrl -like "*/login.html*" -or $formHtml -imatch 'name=["\x27]?buttonClicked') {
-        # Force to 4 — override any 0 value extracted from hidden fields
-        $postBody["buttonClicked"] = "4"
-        $postBody["err_flag"]      = "0"
-        Write-UniLog "Detected Cisco/NEC WebAuth portal (UoM_Wireless). Injecting buttonClicked=4..." "Cyan"
-    }
-
-    # --- Aruba Networks (UoM.Wireless) ---
-    # Aruba controller requires: cmd=authenticate, user, password, mac, ip, essid, apname, apgroup, url
-    if ($actionUrl -like "*cgi-bin/login*" -or $ssid -imatch 'uom\.wireless') {
-        if ($actionUrl -notlike "*cgi-bin/login*") {
-            $actionUrl = "https://connect.uom.lk/cgi-bin/login"
+        if ($hasUsernameField) { $postBody["username"] = $creds.username }
+        if ($hasUserField)     { $postBody["user"]     = $creds.username }
+        if (-not $hasUsernameField -and -not $hasUserField) {
+            $postBody["username"] = $creds.username
+            $postBody["user"]     = $creds.username
         }
-        $postBody["cmd"]  = "authenticate"
-        $postBody["user"] = $creds.username
-        if ($arubaMac)      { $postBody["mac"]      = $arubaMac }
-        if ($arubaIp)       { $postBody["ip"]        = $arubaIp }
-        if ($arubaEssid)    { $postBody["essid"]     = $arubaEssid }
-        if ($arubaApname)   { $postBody["apname"]    = $arubaApname }
-        if ($arubaApgroup)  { $postBody["apgroup"]   = $arubaApgroup }
-        if ($arubaRedirUrl) { $postBody["url"]       = $arubaRedirUrl }
-        $postBody["Login"] = "Log In"
-        Write-UniLog "Detected Aruba Networks portal (UoM.Wireless). Injecting Aruba session params..." "Cyan"
-    }
 
-    # --- Ruijie Networks (UoM-Wireless) ---
-    # Ruijie portal runs on :8443; action must be /login not /index.html
-    if ($actionUrl -like "*:8443*" -or $portalBaseUrl -like "*:8443*" -or $ssid -imatch 'uom-wireless') {
-        if ($actionUrl -like "*/index.html") {
-            $actionUrl = $actionUrl -replace '/index\.html$', '/login'
-        } elseif ($actionUrl -match 'connect\.uom\.lk:8443/?$') {
-            $actionUrl = "https://connect.uom.lk:8443/login"
+        if ($hasPasswordField)          { $postBody["password"] = $creds.password }
+        elseif ($hasPassField)          { $postBody["pass"]     = $creds.password }
+        else                            { $postBody["password"] = $creds.password }
+
+        # STEP 5: Vendor-specific payload injection
+        # Cisco / NEC WebAuth
+        if ($actionUrl -like "*/login.html*" -or $formHtml -imatch 'name=["\x27]?buttonClicked') {
+            $postBody["buttonClicked"] = "4"
+            $postBody["err_flag"]      = "0"
+            Write-UniLog "Detected Cisco/NEC WebAuth portal (UoM_Wireless). Injecting buttonClicked=4..." "Cyan"
         }
-        if (-not $postBody.ContainsKey("username")) { $postBody["username"] = $creds.username }
-        if (-not $postBody.ContainsKey("password")) { $postBody["password"] = $creds.password }
-        Write-UniLog "Detected Ruijie Networks portal (UoM-Wireless). Submitting to $actionUrl..." "Cyan"
-    }
 
-    Write-UniLog "Submitting login credentials for $($creds.username)..." "Cyan"
+        # Aruba Networks
+        if ($actionUrl -like "*cgi-bin/login*" -or $ssid -imatch 'uom\.wireless') {
+            if ($actionUrl -notlike "*cgi-bin/login*") {
+                $actionUrl = "https://connect.uom.lk/cgi-bin/login"
+            }
+            $postBody["cmd"]  = "authenticate"
+            $postBody["user"] = $creds.username
+            if ($arubaMac)      { $postBody["mac"]      = $arubaMac }
+            if ($arubaIp)       { $postBody["ip"]        = $arubaIp }
+            if ($arubaEssid)    { $postBody["essid"]     = $arubaEssid }
+            if ($arubaApname)   { $postBody["apname"]    = $arubaApname }
+            if ($arubaApgroup)  { $postBody["apgroup"]   = $arubaApgroup }
+            if ($arubaRedirUrl) { $postBody["url"]       = $arubaRedirUrl }
+            $postBody["Login"] = "Log In"
+            Write-UniLog "Detected Aruba Networks portal (UoM.Wireless). Injecting Aruba session params..." "Cyan"
+        }
 
-    # --- STEP 6: POST with full cookie jar and Referer header ---
-    Invoke-PortalPost -ActionUrl $actionUrl -Body $postBody -CookieJar $cookieJar -Referer $portalBaseUrl
+        # Ruijie Networks
+        if ($actionUrl -like "*:8443*" -or $portalBaseUrl -like "*:8443*" -or $ssid -imatch 'uom-wireless') {
+            if ($actionUrl -like "*/index.html") {
+                $actionUrl = $actionUrl -replace '/index\.html$', '/login'
+            } elseif ($actionUrl -match 'connect\.uom\.lk:8443/?$') {
+                $actionUrl = "https://connect.uom.lk:8443/login"
+            }
+            if (-not $postBody.ContainsKey("username")) { $postBody["username"] = $creds.username }
+            if (-not $postBody.ContainsKey("password")) { $postBody["password"] = $creds.password }
+            Write-UniLog "Detected Ruijie Networks portal (UoM-Wireless). Submitting to $actionUrl..." "Cyan"
+        }
 
-    # --- STEP 7: Verify connection with grace period ---
-    Start-Sleep -Seconds 1
-    if (Test-IsOnline) {
-        Write-UniLog "[+] Successfully connected! Internet is now active on $ssid." "Green"
-        return
+        Write-UniLog "Submitting login credentials for $($creds.username)..." "Cyan"
+
+        # STEP 6: POST with full cookie jar and Referer header
+        Invoke-PortalPost -ActionUrl $actionUrl -Body $postBody -CookieJar $cookieJar -Referer $portalBaseUrl
+
+        # STEP 7: Verify connection
+        Start-Sleep -Seconds 1
+        if (Test-IsOnline) {
+            Write-UniLog "[+] Successfully connected! Internet is now active on $ssid." "Green"
+            return
+        }
+        Start-Sleep -Seconds 2
+        if (Test-IsOnline) {
+            Write-UniLog "[+] Successfully connected! Internet is now active on $ssid." "Green"
+            return
+        }
+
+        if ($attempt -lt $maxAttempts) {
+            Write-UniLog "Verification pending. Retrying in 2 seconds..." "Yellow"
+            Start-Sleep -Seconds 2
+        }
     }
-    # 2-second gateway settling grace period (same as Linux)
-    Start-Sleep -Seconds 2
-    if (Test-IsOnline) {
-        Write-UniLog "[+] Successfully connected! Internet is now active on $ssid." "Green"
-        return
-    }
-    Write-UniLog "Notice: Credentials submitted. Verifying connection status..." "Yellow"
+    Write-UniLog "Notice: Login credentials submitted. Please check connection status." "Yellow"
 }
 
 # ===========================================================================
@@ -658,18 +686,34 @@ function Add-TrustedNetworks {
     } catch { }
 
     foreach ($ssid in $ssids) {
-        $profileXml = "<?xml version=""1.0""?>" +
-            "<WLANProfile xmlns=""http://www.microsoft.com/networking/WLAN/profile/v1"">" +
-            "<name>$ssid</name>" +
-            "<SSIDConfig><SSID><name>$ssid</name></SSID></SSIDConfig>" +
-            "<connectionType>ESS</connectionType>" +
-            "<connectionMode>auto</connectionMode>" +
-            "<MSM><security><authEncryption>" +
-            "<authentication>open</authentication>" +
-            "<encryption>none</encryption>" +
-            "<useOneX>false</useOneX>" +
-            "</authEncryption></security></MSM>" +
-            "</WLANProfile>"
+        # Generate hex encoding of SSID for WLANProfile schema compliance
+        $hexChars = ($ssid.ToCharArray() | ForEach-Object { '{0:X2}' -f [int]$_ }) -join ''
+
+        $profileXml = @"
+<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>$ssid</name>
+    <SSIDConfig>
+        <SSID>
+            <hex>$hexChars</hex>
+            <name>$ssid</name>
+        </SSID>
+        <nonBroadcast>false</nonBroadcast>
+    </SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>auto</connectionMode>
+    <autoSwitch>true</autoSwitch>
+    <MSM>
+        <security>
+            <authEncryption>
+                <authentication>open</authentication>
+                <encryption>none</encryption>
+                <useOneX>false</useOneX>
+            </authEncryption>
+        </security>
+    </MSM>
+</WLANProfile>
+"@
 
         $tmpFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "$ssid.xml")
         try {
@@ -685,7 +729,7 @@ function Add-TrustedNetworks {
     }
 
     if ($added -gt 0) {
-        Write-UniLog "Registered $added university network profile(s) for automatic Wi-Fi join." "Green"
+        Write-UniLog "Registered $added university network profile(s) for automatic Wi-Fi join with priority 1." "Green"
     }
 }
 
