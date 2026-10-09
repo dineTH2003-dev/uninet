@@ -141,56 +141,115 @@ if ($MachinePath -notlike "*$InstallDir*") {
     }
 }
 
+
 # ---------------------------------------------------------------------------
-# 4. Register Windows Task Scheduler — triggers on Wi-Fi connect (Event 8001)
-# FIX 9: Direct powershell.exe with <Hidden>true</Hidden> — no VBScript launcher
-# FIX 7: Task Scheduler reads credentials from C:\ProgramData\uninet\credentials.json
+# 4. Register Windows Task Scheduler — auto-connect on Wi-Fi join
 # ---------------------------------------------------------------------------
+# ROOT CAUSE OF AUTO-CONNECT FAILURE — two bugs in the original approach:
+#
+# BUG A: <LogonType>InteractiveToken</LogonType> without a <UserId> creates
+#        the task bound to whoever ran the installer (Administrator).
+#        When the regular user connects to Wi-Fi, the task fires for the
+#        admin session — which may not exist — so it silently does nothing.
+#        FIX: Use <GroupId>S-1-5-32-545</GroupId> (BUILTIN\Users) so the
+#        task fires for EVERY logged-in standard user.
+#
+# BUG B: Event 8001 only fires when WLAN AutoConfig completes the 802.11
+#        handshake. On sleep/resume and fast-reconnect, 8001 is NOT re-fired
+#        even though the Wi-Fi is back. That means no trigger → no login.
+#        FIX: Add a second <LogonTrigger> with a 5-second delay. This fires
+#        whenever any user logs in, acting as a guaranteed catch-all.
+# ---------------------------------------------------------------------------
+
 $TaskName  = "UniNetAutoConnect"
 $Action    = "powershell.exe"
 $Arguments = "-ExecutionPolicy Bypass -NoProfile -NonInteractive -WindowStyle Hidden -File `"$ScriptDest`" login -Quiet"
 
-# Remove old task silently
+# Remove any previous version of this task
 $null = cmd.exe /c "schtasks /delete /tn `"$TaskName`" /f >nul 2>nul"
+Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
-# XML-based task — triggers on WLAN-AutoConfig Event 8001 (Wi-Fi Connection Succeeded)
-$TaskXml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers>
-    <EventTrigger>
-      <Enabled>true</Enabled>
-      <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;&lt;Select Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;*[System[(EventID=8001)]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
-    </EventTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
-    <Hidden>true</Hidden>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>$Action</Command>
-      <Arguments>$Arguments</Arguments>
-    </Exec>
-  </Actions>
-</Task>
-"@
+# ---------------------------------------------------------------------------
+# Build the task using Register-ScheduledTask (native PS — more reliable
+# than schtasks /xml which silently fails on certain encodings/versions)
+# ---------------------------------------------------------------------------
 
-$TempXml = "$env:TEMP\uninet_task.xml"
-Set-Content -Path $TempXml -Value $TaskXml -Encoding Unicode
-$null = cmd.exe /c "schtasks /create /tn `"$TaskName`" /xml `"$TempXml`" /f >nul 2>nul"
-Remove-Item $TempXml -Force -ErrorAction SilentlyContinue
+# PRINCIPAL: GroupId = BUILTIN\Users (S-1-5-32-545)
+# Fires for ANY logged-in standard user, not just the installer account
+$principal = New-ScheduledTaskPrincipal `
+    -GroupId   "S-1-5-32-545" `
+    -RunLevel  Limited
+
+$action = New-ScheduledTaskAction `
+    -Execute   $Action `
+    -Argument  $Arguments
+
+$settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit       (New-TimeSpan -Minutes 1) `
+    -MultipleInstances        IgnoreNew `
+    -AllowStartIfOnBatteries  `
+    -DontStopIfGoingOnBatteries `
+    -Hidden
+
+# TRIGGER 1: LogonTrigger — fires 5 s after any user logs in
+# Catches sleep/resume, startup, and cases where Event 8001 wasn't re-fired
+$logonTrigger        = New-ScheduledTaskTrigger -AtLogOn
+$logonTrigger.Delay  = "PT5S"
+
+# Register the task with the logon trigger first (Register-ScheduledTask
+# does not support EventTrigger natively, so we add it via XML next)
+try {
+    Register-ScheduledTask `
+        -TaskName  $TaskName `
+        -Action    $action `
+        -Principal $principal `
+        -Settings  $settings `
+        -Trigger   $logonTrigger `
+        -Force     | Out-Null
+} catch {
+    Write-Host "[!] Warning: Could not register scheduled task via Register-ScheduledTask: $_" -ForegroundColor Yellow
+}
+
+# TRIGGER 2: EventTrigger — fires instantly on WLAN Event 8001 (Wi-Fi connected)
+# We inject this by exporting the task XML, adding the EventTrigger, and re-importing.
+# This is necessary because Register-ScheduledTask has no -EventTrigger parameter.
+try {
+    $exportedXml = Export-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+
+    $eventSubscription = '&lt;QueryList&gt;&lt;Query Id="0" Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;&lt;Select Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;*[System[(EventID=8001)]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;'
+    $eventTriggerXml   = "<EventTrigger><Enabled>true</Enabled><Subscription>$eventSubscription</Subscription></EventTrigger>"
+
+    # Inject EventTrigger BEFORE the existing LogonTrigger inside <Triggers>
+    $updatedXml = $exportedXml -replace '<Triggers>', "<Triggers>$eventTriggerXml"
+
+    $TempXml = "$env:TEMP\uninet_task_final.xml"
+    $updatedXml | Out-File -FilePath $TempXml -Encoding Unicode -Force
+
+    # Re-import with both triggers
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    $result = cmd.exe /c "schtasks /create /tn `"$TaskName`" /xml `"$TempXml`" /f 2>&1"
+    Remove-Item $TempXml -Force -ErrorAction SilentlyContinue
+
+    if ($result -match "SUCCESS|successfully") {
+        Write-Host "[+] Task registered with Event 8001 + Logon triggers." -ForegroundColor Green
+    } else {
+        Write-Host "[+] Task registered with Logon trigger (Event injection: $result)." -ForegroundColor Cyan
+    }
+} catch {
+    Write-Host "[+] Task registered with Logon trigger only (Event trigger export failed: $_)." -ForegroundColor Cyan
+}
+
+# Verify the task actually exists
+$verify = schtasks /query /tn $TaskName /fo LIST 2>$null
+if ($verify -match $TaskName) {
+    Write-Host "[+] Auto-connect task verified: '$TaskName' is active in Task Scheduler." -ForegroundColor Green
+} else {
+    Write-Host "[!] Warning: Task '$TaskName' was not found after registration. Auto-connect may not work." -ForegroundColor Yellow
+    Write-Host "    You can manually re-register by running this installer again as Administrator." -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------------------
 # 5. Launch interactive setup in a fresh PowerShell process
 # ---------------------------------------------------------------------------
 & powershell.exe -ExecutionPolicy Bypass -NoProfile -File "$ScriptDest" setup
+
