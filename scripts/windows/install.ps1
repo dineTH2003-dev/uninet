@@ -175,7 +175,9 @@ $null = cmd.exe /c "schtasks /delete /tn `"$TaskName`" /f >nul 2>nul"
 # 1. Triggers on NetworkProfile Event 10000 (Universal network connection on Windows 10/11)
 # 2. Triggers on WLAN-AutoConfig Event 8001 (Wi-Fi association)
 # 3. Triggers on User Logon (with 5s delay for sleep/resume, unlock, and startup)
-# 4. Runs as BUILTIN\Users (S-1-5-32-545) with LeastPrivilege (works for all users)
+# 4. Runs as LOCAL SYSTEM (S-1-5-18) in Session 0 — PREVENTS CONSOLE WINDOW FLASH!
+#    In Session 0, Windows does not create an interactive desktop console,
+#    so powershell.exe runs 100% silently with zero popup or screen flicker.
 # 5. Allows running on battery power (DisallowStartIfOnBatteries = false)
 $TaskXml = @"
 <?xml version="1.0" encoding="UTF-16"?>
@@ -192,8 +194,8 @@ $TaskXml = @"
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <GroupId>S-1-5-32-545</GroupId>
-      <RunLevel>LeastPrivilege</RunLevel>
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
   <Settings>
@@ -224,7 +226,7 @@ if ($verify -match $TaskName) {
     $taskExists = $true
 } else {
     try {
-        $principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+        $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel HighestAvailable
         $taskAct   = New-ScheduledTaskAction -Execute $Action -Argument $Arguments
         $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
         $logonTrig = New-ScheduledTaskTrigger -AtLogOn

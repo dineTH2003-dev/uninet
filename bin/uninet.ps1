@@ -22,7 +22,7 @@ param (
 # ---------------------------------------------------------------------------
 $ErrorActionPreference = "Continue"
 
-$Version = "1.2.3"
+$Version = "1.2.4"
 $RepoRawUrl     = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 $ConfigDir      = "$env:APPDATA\uninet"
 $CredsFile      = "$ConfigDir\credentials.json"
