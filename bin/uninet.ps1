@@ -583,9 +583,17 @@ function Test-VersionNotification {
         $wc = New-Object System.Net.WebClient
         $wc.Headers.Add("User-Agent", "UniNet-Windows/$Version")
         $latest = ($wc.DownloadString("$RepoRawUrl/VERSION")).Trim()
-        if ($latest -and $latest -ne $Version) {
-            Write-Host "[*] A new version of UniNet is available (v$latest)." -ForegroundColor Yellow
-            Write-Host "    Run 'uninet update' to upgrade automatically.`n" -ForegroundColor Yellow
+        if ($latest) {
+            $isNewer = $false
+            try {
+                if ([version]$latest -gt [version]$Version) { $isNewer = $true }
+            } catch {
+                if ($latest -ne $Version) { $isNewer = $true }
+            }
+            if ($isNewer) {
+                Write-Host "[*] A new version of UniNet is available (v$latest)." -ForegroundColor Yellow
+                Write-Host "    Run 'uninet update' to upgrade automatically.`n" -ForegroundColor Yellow
+            }
         }
     } catch { }
 }
@@ -897,8 +905,13 @@ function Invoke-UniUpdate {
         return
     }
 
-    if (-not $latest) { Write-Host "Error: Empty version response." -ForegroundColor Red; return }
-    if ($latest -eq $Version) { Write-Host "[+] UniNet is already up to date (v$Version)." -ForegroundColor Green; return }
+    $isNewer = $false
+    try {
+        if ([version]$latest -gt [version]$Version) { $isNewer = $true }
+    } catch {
+        if ($latest -ne $Version) { $isNewer = $true }
+    }
+    if (-not $isNewer) { Write-Host "[+] UniNet is already up to date (v$Version)." -ForegroundColor Green; return }
 
     Write-Host "Found newer version: v$latest (current: v$Version). Upgrading..." -ForegroundColor Cyan
 

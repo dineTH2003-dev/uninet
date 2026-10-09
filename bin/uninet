@@ -401,6 +401,28 @@ cmd_login() {
     fi
 }
 
+# Helper: returns 0 (true) if $1 is strictly newer than $2 according to semver
+is_newer_version() {
+    local new="$1"
+    local curr="$2"
+    [ -z "$new" ] && return 1
+    [ "$new" = "$curr" ] && return 1
+
+    local IFS=.
+    set -- $new
+    local n1=${1:-0} n2=${2:-0} n3=${3:-0}
+    set -- $curr
+    local c1=${1:-0} c2=${2:-0} c3=${3:-0}
+    IFS=' '
+
+    [ "$n1" -gt "$c1" ] 2>/dev/null && return 0
+    [ "$n1" -lt "$c1" ] 2>/dev/null && return 1
+    [ "$n2" -gt "$c2" ] 2>/dev/null && return 0
+    [ "$n2" -lt "$c2" ] 2>/dev/null && return 1
+    [ "$n3" -gt "$c3" ] 2>/dev/null && return 0
+    return 1
+}
+
 # 6. Status check
 check_version_notification() {
     [ -t 1 ] || return 0
@@ -427,9 +449,15 @@ check_version_notification() {
         fi
     fi
 
-    if [ -n "$latest_ver" ] && [ "$latest_ver" != "$VERSION" ]; then
+    if is_newer_version "$latest_ver" "$VERSION"; then
         echo -e "\n${YELLOW}💡 A new version of UniNet is available (v${latest_ver}).${RESET}"
         echo -e "   Run ${BOLD}uninet update${RESET} to upgrade automatically."
+    else
+        # If cache holds an older or equal version, self-heal the cache
+        if [ -n "$latest_ver" ] && [ "$latest_ver" != "$VERSION" ]; then
+            mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+            echo -e "$now\n$VERSION" > "$cache_file" 2>/dev/null || true
+        fi
     fi
 }
 
@@ -837,30 +865,13 @@ cmd_update() {
         return 1
     fi
 
-    if [ "$latest_ver" = "$VERSION" ]; then
+    if ! is_newer_version "$latest_ver" "$VERSION"; then
         echo -e "${GREEN}✔ UniNet is already up to date (v$VERSION).${RESET}"
-        return 0
-    fi
-
-    # Semver check (no downgrades)
-    local IFS=.
-    local curr_ver=($VERSION)
-    local new_ver=($latest_ver)
-    IFS=$' \t\n'
-    local is_newer=0
-    for i in 0 1 2; do
-        local c=${curr_ver[$i]:-0}
-        local n=${new_ver[$i]:-0}
-        if [ "$n" -gt "$c" ]; then
-            is_newer=1
-            break
-        elif [ "$n" -lt "$c" ]; then
-            break
-        fi
-    done
-    
-    if [ "$is_newer" -eq 0 ]; then
-        echo -e "${GREEN}✔ UniNet is already up to date (v$VERSION >= v$latest_ver).${RESET}"
+        local cache_file="$CONFIG_DIR/update_check"
+        local now
+        now="$(date +%s)"
+        mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+        echo -e "$now\n$VERSION" > "$cache_file" 2>/dev/null || true
         return 0
     fi
 
@@ -913,6 +924,11 @@ cmd_update() {
 
     if [ "$updated" -gt 0 ]; then
         echo -e "${GREEN}✔ Successfully updated UniNet to v${latest_ver}!${RESET}"
+        local cache_file="$CONFIG_DIR/update_check"
+        local now
+        now="$(date +%s)"
+        mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+        echo -e "$now\n$latest_ver" > "$cache_file" 2>/dev/null || true
     else
         echo -e "${YELLOW}Warning: Update downloaded but could not write to binary path.${RESET}"
     fi
