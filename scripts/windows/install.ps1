@@ -34,9 +34,31 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-# FIX 9: Remove legacy uninet_silent.vbs if present from old installs
-Remove-Item "$InstallDir\uninet.ps1"       -Force -ErrorAction SilentlyContinue
-Remove-Item "$InstallDir\uninet_silent.vbs" -Force -ErrorAction SilentlyContinue
+# Security Hardening: Ensure strict permissions on installation directory.
+# Unprivileged users get ReadAndExecute only — prevent Local Privilege Escalation (LPE).
+try {
+    $acl = Get-Acl $InstallDir
+    $usersSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545") # BUILTIN\Users
+    $existingRules = @($acl.Access | Where-Object { $_.IdentityReference -eq $usersSid -or $_.IdentityReference.Value -like "*Users*" })
+    foreach ($r in $existingRules) {
+        try { $acl.RemoveAccessRule($r) | Out-Null } catch { }
+    }
+    $readRule   = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Users", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $acl.AddAccessRule($readRule)
+    $acl.AddAccessRule($adminRule)
+    $acl.AddAccessRule($systemRule)
+    Set-Acl -Path $InstallDir -AclObject $acl
+} catch { }
+
+# Enable WLAN-AutoConfig Operational channel so Event 8001 fires reliably on Wi-Fi association
+try {
+    cmd.exe /c "wevtutil sl Microsoft-Windows-WLAN-AutoConfig/Operational /e:true 2>nul"
+} catch { }
+
+# Clean legacy uninet.ps1 if present from older installations
+Remove-Item "$InstallDir\uninet.ps1" -Force -ErrorAction SilentlyContinue
 
 # Check if running from a local clone (dev workflow)
 $LocalScript = $null
@@ -117,12 +139,18 @@ if ($LocalScript) {
 Unblock-File "$ScriptDest" -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------
-# 2. Create uninet.cmd wrapper — allows typing 'uninet' in CMD or PowerShell
+# 2. Create uninet.cmd wrapper & uninet_silent.vbs runner
 # ---------------------------------------------------------------------------
 $CmdDest    = "$InstallDir\uninet.cmd"
 $CmdContent = "@echo off`r`npowershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$ScriptDest`" %*"
 Set-Content -Path $CmdDest -Value $CmdContent -Encoding ASCII
 Unblock-File "$CmdDest" -ErrorAction SilentlyContinue
+
+# Silent VBScript launcher: runs PowerShell with SW_HIDE (0) so zero console windows flash
+$VbsDest    = "$InstallDir\uninet_silent.vbs"
+$VbsContent = "Set WshShell = CreateObject(`"WScript.Shell`")`r`nWshShell.Run `"powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -WindowStyle Hidden -File `"`"$ScriptDest`"`" login -Quiet`", 0, False"
+Set-Content -Path $VbsDest -Value $VbsContent -Encoding ASCII
+Unblock-File "$VbsDest" -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------
 # 3. Add InstallDir to PATH (Machine scope, fall back to User scope)
@@ -145,39 +173,28 @@ if ($MachinePath -notlike "*$InstallDir*") {
 # ---------------------------------------------------------------------------
 # 4. Register Windows Task Scheduler — auto-connect on Wi-Fi join
 # ---------------------------------------------------------------------------
-# ROOT CAUSE OF AUTO-CONNECT FAILURE — two bugs in the original approach:
-#
-# BUG A: <LogonType>InteractiveToken</LogonType> without a <UserId> creates
-#        the task bound to whoever ran the installer (Administrator).
-#        When the regular user connects to Wi-Fi, the task fires for the
-#        admin session — which may not exist — so it silently does nothing.
-#        FIX: Use <GroupId>S-1-5-32-545</GroupId> (BUILTIN\Users) so the
-#        task fires for EVERY logged-in standard user.
-#
-# BUG B: Event 8001 only fires when WLAN AutoConfig completes the 802.11
-#        handshake. On sleep/resume and fast-reconnect, 8001 is NOT re-fired
-#        even though the Wi-Fi is back. That means no trigger → no login.
-#        FIX: Add a second <LogonTrigger> with a 5-second delay. This fires
-#        whenever any user logs in, acting as a guaranteed catch-all.
-# ---------------------------------------------------------------------------
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+if ([string]::IsNullOrWhiteSpace($currentUser)) {
+    $currentUser = "$env:USERDOMAIN\$env:USERNAME"
+}
+$userClean = $env:USERNAME
+if (-not $userClean) { $userClean = ($currentUser -split '\\')[-1] }
+$TaskName  = "UniNetAutoConnect_$userClean"
+$Action    = "wscript.exe"
+$Arguments = "//nologo `"$VbsDest`""
 
-# ---------------------------------------------------------------------------
-# 4. Register Windows Task Scheduler — auto-connect on Wi-Fi join
-# ---------------------------------------------------------------------------
-$TaskName  = "UniNetAutoConnect"
-$Action    = "powershell.exe"
-$Arguments = "-ExecutionPolicy Bypass -NoProfile -NonInteractive -WindowStyle Hidden -File `"$ScriptDest`" login -Quiet"
-
-# Remove any previous version of this task
+# Remove legacy and current task versions
+$null = cmd.exe /c "schtasks /delete /tn `"UniNetAutoConnect`" /f >nul 2>nul"
 $null = cmd.exe /c "schtasks /delete /tn `"$TaskName`" /f >nul 2>nul"
 
 # Complete Task XML definition:
 # 1. Triggers on NetworkProfile Event 10000 (Universal network connection on Windows 10/11)
 # 2. Triggers on WLAN-AutoConfig Event 8001 (Wi-Fi association)
 # 3. Triggers on User Logon (with 5s delay for sleep/resume, unlock, and startup)
-# 4. Runs as LOCAL SYSTEM (S-1-5-18) in Session 0 — PREVENTS CONSOLE WINDOW FLASH!
-#    In Session 0, Windows does not create an interactive desktop console,
-#    so powershell.exe runs 100% silently with zero popup or screen flicker.
+# 4. Runs as current user ($currentUser) with InteractiveToken and LeastPrivilege:
+#    - Runs inside the user security context with access to %APPDATA%\uninet\credentials.json
+#    - Complete isolation between users on multi-user systems
+#    - 100% invisible background execution via wscript.exe and SW_HIDE (0)
 # 5. Allows running on battery power (DisallowStartIfOnBatteries = false)
 $TaskXml = @"
 <?xml version="1.0" encoding="UTF-16"?>
@@ -190,12 +207,14 @@ $TaskXml = @"
     <LogonTrigger>
       <Enabled>true</Enabled>
       <Delay>PT5S</Delay>
+      <UserId>$currentUser</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
+      <UserId>$currentUser</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
   <Settings>
@@ -226,7 +245,7 @@ if ($verify -match $TaskName) {
     $taskExists = $true
 } else {
     try {
-        $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel HighestAvailable
+        $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel LeastPrivilege
         $taskAct   = New-ScheduledTaskAction -Execute $Action -Argument $Arguments
         $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
         $logonTrig = New-ScheduledTaskTrigger -AtLogOn

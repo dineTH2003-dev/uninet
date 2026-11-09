@@ -34,14 +34,14 @@ jobs:
           bash -n install.sh
           bash -n uninstall.sh
 
-  test-windows:
-    name: PowerShell Syntax Check (Windows)
+  test-windows-ps5:
+    name: Windows PowerShell 5.1 Validation
     runs-on: windows-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Validate PowerShell Scripts
+      - name: Validate PowerShell 5.1 Scripts & Tests
         shell: powershell
         run: |
           $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")
@@ -59,4 +59,33 @@ jobs:
 
           # Verify runtime execution in Windows PowerShell 5.1
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\bin\uninet.ps1" help
+          & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\tests\test_windows.ps1"
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\scripts\windows\uninstall.ps1"
+
+  test-windows-pwsh:
+    name: PowerShell 7+ Core Validation
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate PowerShell 7+ Scripts & Tests
+        shell: pwsh
+        run: |
+          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")
+          foreach ($s in $scripts) {
+              $tokens = $null
+              $errors = $null
+              $fullPath = (Resolve-Path $s).Path
+              $ast = [System.Management.Automation.Language.Parser]::ParseFile($fullPath, [ref]$tokens, [ref]$errors)
+              if ($errors.Count -gt 0) {
+                  Write-Error "Syntax error in $s : $errors"
+                  exit 1
+              }
+              Write-Host "[+] $s passed AST syntax validation"
+          }
+
+          # Verify runtime execution in PowerShell 7+
+          & pwsh -NoProfile -File ".\bin\uninet.ps1" help
+          & pwsh -NoProfile -File ".\tests\test_windows.ps1"
+          & pwsh -NoProfile -File ".\scripts\windows\uninstall.ps1"

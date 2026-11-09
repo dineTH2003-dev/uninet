@@ -27,10 +27,15 @@ $RepoRawUrl     = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 $ConfigDir      = "$env:APPDATA\uninet"
 $CredsFile      = "$ConfigDir\credentials.json"
 $SysCredsFile   = "C:\ProgramData\uninet\credentials.json"
-$ProbeUrl       = "http://connectivitycheck.gstatic.com/generate_204"
-# FIX 3: Secondary probe that Aruba actually intercepts (gstatic is whitelisted by Aruba)
-$ArubaProbeUrl  = "http://connectivity-check.ubuntu.com./"
+
+# Probing endpoints with test harness override support
+$ProbeUrl       = if ($env:UNINET_TEST_PROBE_URL) { $env:UNINET_TEST_PROBE_URL } else { "http://connectivitycheck.gstatic.com/generate_204" }
+$ArubaProbeUrl  = if ($env:UNINET_TEST_ARUBA_PROBE_URL) { $env:UNINET_TEST_ARUBA_PROBE_URL } else { "http://connectivity-check.ubuntu.com./" }
 $MatchPatterns  = @("uom_wireless", "uom.wireless", "uom-wireless")
+
+# Structured failure and diagnostic state tracking
+$global:LastAuthStatus = "UNKNOWN"
+$global:LastAuthErrorDetail = ""
 
 # ---------------------------------------------------------------------------
 # FIX 8: Enable TLS 1.2/1.3 at startup — required for GitHub raw on old PS/Windows
@@ -45,21 +50,48 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# Portal SSL: accept self-signed certs on internal university gateways (ICertificatePolicy)
+# Portal SSL: Strict certificate validation by default.
+# Prevents Evil Twin rogue AP credential theft by rejecting untrusted certs.
+# Bypasses are strictly disallowed; private institutional CAs must be installed
+# in the Windows trust store or explicitly pinned via UNINET_PINNED_CERT_THUMBPRINT.
 # ---------------------------------------------------------------------------
-try {
-    if (-not ([System.Management.Automation.PSTypeName]'UniNetCertPolicy').Type) {
-        Add-Type -TypeDefinition @'
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class UniNetCertPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert,
-                                      WebRequest req, int problem) { return true; }
+function Initialize-UniTlsCallback {
+    try {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
+            param($sender, $certificate, $chain, $sslPolicyErrors)
+            # 1. Standard certificate chain validated via Windows certificate store
+            if ($sslPolicyErrors -eq [System.Net.Security.SslPolicyErrors]::None) {
+                return $true
+            }
+            # 2. Local loopback testing ONLY when explicitly permitted by test environment
+            if ($env:UNINET_ALLOW_TEST_CERT -eq "1" -and $sender -is [System.Net.HttpWebRequest]) {
+                $reqHost = $sender.RequestUri.Host.ToLower()
+                if ($reqHost -eq "127.0.0.1" -or $reqHost -eq "localhost") {
+                    return $true
+                }
+            }
+            # 3. Explicitly pinned institutional certificate thumbprint (if configured)
+            # Enforce 40-character hex thumbprint AND strict hostname binding to connect.uom.lk
+            if ($env:UNINET_PINNED_CERT_THUMBPRINT -and $certificate) {
+                $cleanThumb = $env:UNINET_PINNED_CERT_THUMBPRINT.Trim()
+                if ($cleanThumb -match '^[0-9A-Fa-f]{40}$') {
+                    $reqHost = ""
+                    if ($sender -is [System.Net.HttpWebRequest]) {
+                        $reqHost = $sender.RequestUri.Host.ToLower()
+                    }
+                    $isHostAuthorized = ($reqHost -eq "connect.uom.lk") -or
+                        ($env:UNINET_ALLOW_TEST_CERT -eq "1" -and ($reqHost -eq "127.0.0.1" -or $reqHost -eq "localhost"))
+                    if ($isHostAuthorized -and ($certificate.GetCertHashString() -ieq $cleanThumb)) {
+                        return $true
+                    }
+                }
+            }
+            # Reject all other invalid or untrusted certificates
+            return $false
+        }
+    } catch { }
 }
-'@ -ErrorAction SilentlyContinue
-    }
-    [System.Net.ServicePointManager]::CertificatePolicy = New-Object UniNetCertPolicy
-} catch { }
+Initialize-UniTlsCallback
 
 # ===========================================================================
 # UTILITY FUNCTIONS
@@ -75,6 +107,11 @@ function Write-UniLog([string]$Message, [string]$Color = "Cyan") {
 # FIX 10: Locale-safe SSID extraction — netsh labels change in non-English Windows
 # ---------------------------------------------------------------------------
 function Get-ActiveSSID {
+    # Test harness override for automated test suites
+    if ($env:UNINET_TEST_SSID) {
+        return $env:UNINET_TEST_SSID
+    }
+
     # Method 1: Get-NetConnectionProfile — FASTEST, locale-independent, works without Location API
     try {
         $profiles = Get-NetConnectionProfile -ErrorAction SilentlyContinue
@@ -124,8 +161,9 @@ function Get-ActiveSSID {
 
 function Test-UniversityNetwork([string]$SSID) {
     if ([string]::IsNullOrWhiteSpace($SSID)) { return $false }
+    $patterns = if ($MatchPatterns) { $MatchPatterns } else { @("uom_wireless", "uom.wireless", "uom-wireless") }
     $lower = $SSID.ToLower()
-    foreach ($pat in $MatchPatterns) {
+    foreach ($pat in $patterns) {
         if ($lower -like "*$pat*") { return $true }
     }
     return $false
@@ -134,7 +172,8 @@ function Test-UniversityNetwork([string]$SSID) {
 # Standard online check (gstatic) — reliable for Cisco/Ruijie portals
 function Test-IsOnline {
     try {
-        $req = [System.Net.HttpWebRequest]::Create($ProbeUrl)
+        $targetProbe = if ($env:UNINET_TEST_PROBE_URL) { $env:UNINET_TEST_PROBE_URL } else { $ProbeUrl }
+        $req = [System.Net.HttpWebRequest]::Create($targetProbe)
         $req.Timeout = 4000
         $req.Method  = "GET"
         $req.AllowAutoRedirect = $false
@@ -153,7 +192,8 @@ function Test-IsOnline {
 # FIX 3: Aruba-specific secondary probe — Aruba intercepts this; gstatic it whitelists
 function Test-ArubaOnline {
     try {
-        $req = [System.Net.HttpWebRequest]::Create($ArubaProbeUrl)
+        $targetProbe = if ($env:UNINET_TEST_ARUBA_PROBE_URL) { $env:UNINET_TEST_ARUBA_PROBE_URL } else { $ArubaProbeUrl }
+        $req = [System.Net.HttpWebRequest]::Create($targetProbe)
         $req.Timeout = 4000
         $req.Method  = "GET"
         $req.AllowAutoRedirect = $false
@@ -170,16 +210,145 @@ function Test-ArubaOnline {
     return $false
 }
 
-function Get-SavedCredentials {
-    # FIX 7: Check ProgramData FIRST — Task Scheduler runs without user APPDATA context
-    $files = @($SysCredsFile, $CredsFile)
-    foreach ($f in $files) {
-        if (Test-Path $f) {
-            try {
-                $json = Get-Content -Raw -Path $f -ErrorAction Stop | ConvertFrom-Json
-                if ($json.username -and $json.password) { return $json }
-            } catch { }
+# Unified online probe consistent with the active network controller
+function Test-NetworkOnline([string]$SSID = "") {
+    if ([string]::IsNullOrWhiteSpace($SSID)) { $SSID = Get-ActiveSSID }
+    if ($SSID -imatch 'uom\.wireless') {
+        return (Test-ArubaOnline)
+    }
+    return (Test-IsOnline)
+}
+
+# ---------------------------------------------------------------------------
+# SECURITY: Validate that portal action/redirect endpoints match approved
+# institutional domains or local network gateway addresses before sending credentials.
+# ---------------------------------------------------------------------------
+function Test-TrustedAuthEndpoint([string]$Url) {
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+    try {
+        $uri = [System.Uri]$Url
+
+        # Scheme must be HTTP or HTTPS
+        if ($uri.Scheme -ne "http" -and $uri.Scheme -ne "https") {
+            return $false
         }
+
+        $reqHost = $uri.Host.ToLower()
+
+        # Local test loopback is permitted on any port for mock testing
+        if ($reqHost -eq "127.0.0.1" -or $reqHost -eq "localhost") {
+            return $true
+        }
+
+        # Remote endpoints: restricted strictly to connect.uom.lk
+        if ($reqHost -ne "connect.uom.lk") {
+            return $false
+        }
+
+        # Port validation for connect.uom.lk: restricted strictly to standard web and portal ports
+        $port = $uri.Port
+        if ($port -ne 80 -and $port -ne 443 -and $port -ne 8443) {
+            return $false
+        }
+
+        return $true
+    } catch { }
+    return $false
+}
+
+# ---------------------------------------------------------------------------
+# CREDENTIAL ENCRYPTION (DPAPI)
+# User-scoped DPAPI protection with strict security boundaries on Windows
+# ---------------------------------------------------------------------------
+function Protect-Secret([string]$PlainText) {
+    if ([string]::IsNullOrEmpty($PlainText)) { return "" }
+    $osIsWindows = ([Environment]::OSVersion.Platform -eq "Win32NT")
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+        $enc = [System.Security.Cryptography.ProtectedData]::Protect(
+            $bytes,
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [System.Convert]::ToBase64String($enc)
+    } catch {
+        if ($osIsWindows) {
+            # On Windows, cryptographic failures must NEVER fall back to plaintext.
+            throw [System.Security.SecurityException]::new("DPAPI encryption failed on Windows: $($_.Exception.Message)")
+        }
+        # Non-Windows test runner fallback ONLY when running on Linux/macOS
+        return $PlainText
+    }
+}
+
+function Unprotect-Secret([string]$ProtectedText) {
+    if ([string]::IsNullOrEmpty($ProtectedText)) { return "" }
+    $osIsWindows = ([Environment]::OSVersion.Platform -eq "Win32NT")
+    try {
+        $bytes = [System.Convert]::FromBase64String($ProtectedText)
+        $dec = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $bytes,
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [System.Text.Encoding]::UTF8.GetString($dec)
+    } catch {
+        if ($osIsWindows) {
+            # On Windows, corrupted or invalid ciphertext must NEVER trigger a plaintext fallback.
+            return $null
+        }
+        # Non-Windows test host fallback
+        return $ProtectedText
+    }
+}
+
+function Get-SavedCredentials {
+    # Test harness credentials override for isolated automation
+    if ($env:UNINET_TEST_CREDS_FILE -and (Test-Path $env:UNINET_TEST_CREDS_FILE)) {
+        try {
+            $json = Get-Content -Raw -Path $env:UNINET_TEST_CREDS_FILE -ErrorAction Stop | ConvertFrom-Json
+            if ($json.username -and $json.password) {
+                $decPass = Unprotect-Secret $json.password
+                if (-not [string]::IsNullOrEmpty($decPass)) {
+                    return [PSCustomObject]@{
+                        username = $json.username
+                        password = $decPass
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    # User-scoped credential path (%APPDATA%\uninet\credentials.json)
+    if ($CredsFile -and (Test-Path $CredsFile)) {
+        try {
+            $json = Get-Content -Raw -Path $CredsFile -ErrorAction Stop | ConvertFrom-Json
+            if ($json.username -and $json.password) {
+                $decPass = Unprotect-Secret $json.password
+                if (-not [string]::IsNullOrEmpty($decPass)) {
+                    return [PSCustomObject]@{
+                        username = $json.username
+                        password = $decPass
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    # Legacy fallback: check system credentials if present from older versions
+    if ($SysCredsFile -and (Test-Path $SysCredsFile)) {
+        try {
+            $json = Get-Content -Raw -Path $SysCredsFile -ErrorAction Stop | ConvertFrom-Json
+            if ($json.username -and $json.password) {
+                $decPass = Unprotect-Secret $json.password
+                if (-not [string]::IsNullOrEmpty($decPass)) {
+                    return [PSCustomObject]@{
+                        username = $json.username
+                        password = $decPass
+                    }
+                }
+            }
+        } catch { }
     }
     return $null
 }
@@ -208,18 +377,43 @@ function Invoke-NoFollowProbe {
 
         $resp = $null
         try { $resp = $req.GetResponse() }
-        catch [System.Net.WebException] { $resp = $_.Exception.Response }
+        catch [System.Net.WebException] {
+            if ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::TrustFailure -or
+                $_.Exception.Status -eq [System.Net.WebExceptionStatus]::SecureChannelFailure -or
+                $_.Exception.Message -match 'trust relationship|SSL/TLS') {
+                $global:LastAuthStatus = "TLS_VALIDATION_FAILED"
+                $global:LastAuthErrorDetail = "TLS validation failed for probe '$Uri'."
+            } elseif ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::Timeout) {
+                $global:LastAuthStatus = "AUTHENTICATION_TIMEOUT"
+                $global:LastAuthErrorDetail = "Probe connection timed out for '$Uri'."
+            }
+            $resp = $_.Exception.Response
+        }
 
         if ($resp) {
             $result.StatusCode = [int]$resp.StatusCode
             $result.Location   = $resp.Headers["Location"]
             try {
                 $sc = $resp.Headers.GetValues("Set-Cookie")
-                if ($sc) { $result.SetCookies = $sc }
+                if ($sc) {
+                    $result.SetCookies = $sc
+                    foreach ($cookieStr in $sc) {
+                        try {
+                            $CookieJar.SetCookies($req.RequestUri, $cookieStr)
+                        } catch { }
+                    }
+                }
             } catch { }
             $resp.Close()
         }
-    } catch { }
+    } catch {
+        if ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::TrustFailure -or
+            $_.Exception.Status -eq [System.Net.WebExceptionStatus]::SecureChannelFailure -or
+            $_.Exception.Message -match 'trust relationship|SSL/TLS') {
+            $global:LastAuthStatus = "TLS_VALIDATION_FAILED"
+            $global:LastAuthErrorDetail = "TLS validation failed for probe '$Uri'."
+        }
+    }
     return $result
 }
 
@@ -243,6 +437,15 @@ function Invoke-FollowProbe {
         $resp = $null
         try { $resp = $req.GetResponse() }
         catch [System.Net.WebException] {
+            if ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::TrustFailure -or
+                $_.Exception.Status -eq [System.Net.WebExceptionStatus]::SecureChannelFailure -or
+                $_.Exception.Message -match 'trust relationship|SSL/TLS') {
+                $global:LastAuthStatus = "TLS_VALIDATION_FAILED"
+                $global:LastAuthErrorDetail = "TLS validation failed for landing page '$Uri'."
+            } elseif ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::Timeout) {
+                $global:LastAuthStatus = "AUTHENTICATION_TIMEOUT"
+                $global:LastAuthErrorDetail = "Probe connection timed out for landing page '$Uri'."
+            }
             if ($_.Exception.Response) { $resp = $_.Exception.Response }
         }
 
@@ -256,7 +459,14 @@ function Invoke-FollowProbe {
             } catch { }
             $resp.Close()
         }
-    } catch { }
+    } catch {
+        if ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::TrustFailure -or
+            $_.Exception.Status -eq [System.Net.WebExceptionStatus]::SecureChannelFailure -or
+            $_.Exception.Message -match 'trust relationship|SSL/TLS') {
+            $global:LastAuthStatus = "TLS_VALIDATION_FAILED"
+            $global:LastAuthErrorDetail = "TLS validation failed for landing page '$Uri'."
+        }
+    }
     return $result
 }
 
@@ -268,11 +478,20 @@ function Invoke-PortalPost {
         [System.Net.CookieContainer]$CookieJar,
         [string]$Referer = ""
     )
+    # Security gatekeeper: prevent credentials from leaking to rogue APs
+    if (-not (Test-TrustedAuthEndpoint $ActionUrl)) {
+        $global:LastAuthStatus = "INVALID_AUTH_ENDPOINT"
+        $global:LastAuthErrorDetail = "Target authentication endpoint '$ActionUrl' rejected by institutional domain security policy."
+        Write-UniLog "Security Warning: Target URL '$ActionUrl' is not a trusted university or gateway domain. POST aborted." "Red"
+        return
+    }
+
     try {
-        # URL-encode each field manually — no dependency on Invoke-WebRequest
+        # URL-encode each field safely — coerce nulls to empty string to prevent ArgumentNullException
         $pairs = @()
         foreach ($k in $Body.Keys) {
-            $pairs += [Uri]::EscapeDataString($k) + "=" + [Uri]::EscapeDataString($Body[$k])
+            $val = if ($null -ne $Body[$k]) { [string]$Body[$k] } else { "" }
+            $pairs += [Uri]::EscapeDataString($k) + "=" + [Uri]::EscapeDataString($val)
         }
         $encoded   = $pairs -join "&"
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($encoded)
@@ -295,9 +514,36 @@ function Invoke-PortalPost {
 
         $resp = $null
         try { $resp = $req.GetResponse() }
-        catch [System.Net.WebException] { $resp = $_.Exception.Response }
+        catch [System.Net.WebException] {
+            if ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::TrustFailure -or
+                $_.Exception.Status -eq [System.Net.WebExceptionStatus]::SecureChannelFailure -or
+                $_.Exception.Message -match 'trust relationship|SSL/TLS') {
+                $global:LastAuthStatus = "TLS_VALIDATION_FAILED"
+                $global:LastAuthErrorDetail = "TLS validation failed during POST to '$ActionUrl'."
+            } elseif ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::Timeout) {
+                $global:LastAuthStatus = "AUTHENTICATION_TIMEOUT"
+                $global:LastAuthErrorDetail = "Authentication request timed out while POSTing to '$ActionUrl'."
+            } elseif ($_.Exception.Response) {
+                $resp = $_.Exception.Response
+                $statusCode = [int]$resp.StatusCode
+                if ($statusCode -eq 401 -or $statusCode -eq 403) {
+                    $global:LastAuthStatus = "AUTHENTICATION_REJECTED"
+                    $global:LastAuthErrorDetail = "Portal server returned HTTP $statusCode authentication rejection."
+                }
+            }
+        }
         if ($resp) { $resp.Close() }
-    } catch { }
+    } catch {
+        if ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::TrustFailure -or
+            $_.Exception.Status -eq [System.Net.WebExceptionStatus]::SecureChannelFailure -or
+            $_.Exception.Message -match 'trust relationship|SSL/TLS') {
+            $global:LastAuthStatus = "TLS_VALIDATION_FAILED"
+            $global:LastAuthErrorDetail = "TLS validation failed during POST to '$ActionUrl'."
+        } elseif ($_.Exception.Status -eq [System.Net.WebExceptionStatus]::Timeout) {
+            $global:LastAuthStatus = "AUTHENTICATION_TIMEOUT"
+            $global:LastAuthErrorDetail = "Authentication request timed out while POSTing to '$ActionUrl'."
+        }
+    }
 }
 
 # ===========================================================================
@@ -338,18 +584,28 @@ function Get-FormActionUrl([string]$Html) {
     return ""
 }
 
-# Resolve relative URL against a base URL — mirrors Linux resolve_url()
+# Resolve relative URL against a base URL — mirrors Linux resolve_url() with full RFC 3986 compliance
 function Resolve-PortalUrl([string]$Base, [string]$Target) {
     if ([string]::IsNullOrWhiteSpace($Target)) { return $Base }
     if ($Target -match '^https?://') { return $Target }
     try {
         $baseUri = [System.Uri]$Base
-        if ($Target.StartsWith('/')) {
-            return "$($baseUri.Scheme)://$($baseUri.Authority)$Target"
-        }
-        $baseDir = $baseUri.AbsoluteUri -replace '[^/]+$', ''
-        return "$baseDir$Target"
-    } catch { return $Base }
+        return ([System.Uri]::new($baseUri, $Target)).AbsoluteUri
+    } catch {
+        try {
+            $baseUri = [System.Uri]$Base
+            if ($Target.StartsWith('//')) {
+                return "$($baseUri.Scheme):$Target"
+            }
+            if ($Target.StartsWith('/')) {
+                return "$($baseUri.Scheme)://$($baseUri.Authority)$Target"
+            }
+            if ($Target.StartsWith('?')) {
+                return "$($baseUri.AbsoluteUri.Split('?')[0])$Target"
+            }
+            $baseDir = $baseUri.AbsoluteUri -replace '[^/]+$', ''
+        } catch { return $Base }
+    }
 }
 
 # Extract a named query parameter from a URL string
@@ -371,6 +627,9 @@ function Get-QueryParam([string]$Url, [string]$Name) {
 # CORE LOGIN — FIX 2, 3, 4, 5 applied here
 # ===========================================================================
 function Invoke-UniLogin {
+    $global:LastAuthStatus = "UNKNOWN"
+    $global:LastAuthErrorDetail = ""
+
     # --- Step 1: Detect active Wi-Fi or auto-connect to campus network ---
     $ssid = Get-ActiveSSID
 
@@ -392,30 +651,38 @@ function Invoke-UniLogin {
     }
 
     if ([string]::IsNullOrWhiteSpace($ssid)) {
+        $global:LastAuthStatus = "NETWORK_UNAVAILABLE"
+        $global:LastAuthErrorDetail = "No active Wi-Fi connection detected and no campus network in range."
         Write-UniLog "No active Wi-Fi connection detected and no campus network in range." "Gray"
         return
     }
 
     if (-not (Test-UniversityNetwork $ssid)) {
+        $global:LastAuthStatus = "WRONG_SSID"
+        $global:LastAuthErrorDetail = "Connected network '$ssid' is not a recognized university network."
         Write-UniLog "Connected to non-university Wi-Fi ($ssid). Exiting." "Gray"
         return
     }
 
     # --- Step 2: Wait for DHCP lease and default gateway (up to 8s) ---
-    Write-UniLog "Verifying network gateway on $ssid..." "Cyan"
-    for ($w = 0; $w -lt 8; $w++) {
-        $hasRoute = $false
-        try {
-            $routes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
-            if ($routes) { $hasRoute = $true; break }
-        } catch { }
+    if (-not $env:UNINET_TEST_SSID) {
+        Write-UniLog "Verifying network gateway on $ssid..." "Cyan"
+        for ($w = 0; $w -lt 8; $w++) {
+            $hasRoute = $false
+            try {
+                $routes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+                if ($routes) { $hasRoute = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 1
+        }
+        # Buffer for DNS resolution to initialize
         Start-Sleep -Seconds 1
     }
-    # Buffer for DNS resolution to initialize
-    Start-Sleep -Seconds 1
 
     $creds = Get-SavedCredentials
     if (-not $creds) {
+        $global:LastAuthStatus = "CREDENTIALS_MISSING"
+        $global:LastAuthErrorDetail = "No saved credentials found. Run 'uninet setup' first."
         Write-UniLog "Error: No saved credentials found. Run 'uninet setup' first." "Red"
         return
     }
@@ -423,31 +690,44 @@ function Invoke-UniLogin {
     # --- Step 3: Portal Probe and Authentication with Retry Loop ---
     $maxAttempts = 3
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        # Check if already online
-        if (Test-IsOnline) {
-            if ($ssid -imatch 'uom\.wireless') {
-                if (Test-ArubaOnline) {
-                    Write-UniLog "Already connected to the internet on $ssid." "Green"
-                    return
-                }
-                Write-UniLog "Captive portal detected on $ssid (Aruba). Authenticating..." "Yellow"
-            } else {
-                Write-UniLog "Already connected to the internet on $ssid." "Green"
-                return
-            }
+        # Check if already online using SSID-aware probe
+        if (Test-NetworkOnline -SSID $ssid) {
+            $global:LastAuthStatus = "SUCCESS"
+            $global:LastAuthErrorDetail = ""
+            Write-UniLog "Already connected to the internet on $ssid." "Green"
+            return
         } else {
             Write-UniLog "Captive portal detected on $ssid (Attempt $attempt/$maxAttempts). Authenticating..." "Yellow"
         }
 
         # Choose starting probe URL
-        $activeProbeUrl = if ($ssid -imatch 'uom\.wireless') { $ArubaProbeUrl } else { $ProbeUrl }
+        $targetProbe = if ($env:UNINET_TEST_PROBE_URL) { $env:UNINET_TEST_PROBE_URL } else { $ProbeUrl }
+        $targetAruba = if ($env:UNINET_TEST_ARUBA_PROBE_URL) { $env:UNINET_TEST_ARUBA_PROBE_URL } else { $ArubaProbeUrl }
+        $activeProbeUrl = if ($ssid -imatch 'uom\.wireless') { $targetAruba } else { $targetProbe }
 
         # Persistent cookie jar
         $cookieJar = New-Object System.Net.CookieContainer
 
         # STEP 1: Probe WITHOUT redirect to capture Location header and gateway params
         $probe1 = Invoke-NoFollowProbe -Uri $activeProbeUrl -CookieJar $cookieJar
+        if ($global:LastAuthStatus -eq "TLS_VALIDATION_FAILED") {
+            Write-UniLog "Security Alert: TLS validation failed during initial portal probe. Aborting." "Red"
+            return
+        }
         $locationHeader = $probe1.Location
+
+        # Resolve relative Location header against active probe URL
+        $resolvedLocation = if ($locationHeader) { Resolve-PortalUrl -Base $activeProbeUrl -Target $locationHeader } else { "" }
+
+        # Security gatekeeper: validate redirect destination before following!
+        if ($resolvedLocation) {
+            if (-not (Test-TrustedAuthEndpoint $resolvedLocation)) {
+                $global:LastAuthStatus = "UNTRUSTED_REDIRECT"
+                $global:LastAuthErrorDetail = "Probe redirect target '$resolvedLocation' rejected by institutional domain security policy."
+                Write-UniLog "Security Alert: Probe redirected to untrusted endpoint '$resolvedLocation'. Aborting login." "Red"
+                return
+            }
+        }
 
         # Extract Aruba gateway session parameters
         $arubaMac      = ""
@@ -457,7 +737,7 @@ function Invoke-UniLogin {
         $arubaApgroup  = ""
         $arubaRedirUrl = ""
 
-        $srcUrl = if ($locationHeader) { $locationHeader } else { $activeProbeUrl }
+        $srcUrl = if ($resolvedLocation) { $resolvedLocation } else { $activeProbeUrl }
         if ($srcUrl -match '\?') {
             $arubaMac      = Get-QueryParam -Url $srcUrl -Name "mac"
             $arubaMac      = $arubaMac -replace '%3[Aa]', ':'
@@ -468,9 +748,13 @@ function Invoke-UniLogin {
             $arubaRedirUrl = Get-QueryParam -Url $srcUrl -Name "url"
         }
 
-        # STEP 2: Follow redirects to landing page, get form HTML
-        $followUrl = if ($locationHeader) { $locationHeader } else { $activeProbeUrl }
+        # STEP 2: Follow redirects to landing page, get form HTML (ALWAYS using absolute URL)
+        $followUrl = if ($resolvedLocation) { $resolvedLocation } else { $activeProbeUrl }
         $probe2    = Invoke-FollowProbe -Uri $followUrl -CookieJar $cookieJar
+        if ($global:LastAuthStatus -eq "TLS_VALIDATION_FAILED") {
+            Write-UniLog "Security Alert: TLS validation failed while fetching portal landing page. Aborting." "Red"
+            return
+        }
         $formHtml  = $probe2.Body
         $portalBaseUrl = $probe2.EffectiveUrl
         if ([string]::IsNullOrWhiteSpace($portalBaseUrl)) { $portalBaseUrl = $followUrl }
@@ -480,12 +764,23 @@ function Invoke-UniLogin {
             $metaUrl = $matches[1].Trim('"', "'")
             $resolved = Resolve-PortalUrl -Base $portalBaseUrl -Target $metaUrl
             if ($resolved -and $resolved -ne $portalBaseUrl) {
+                if (-not (Test-TrustedAuthEndpoint $resolved)) {
+                    $global:LastAuthStatus = "UNTRUSTED_REDIRECT"
+                    $global:LastAuthErrorDetail = "Meta-refresh redirect target '$resolved' rejected by institutional domain security policy."
+                    Write-UniLog "Security Alert: Meta-refresh redirected to untrusted endpoint '$resolved'. Aborting login." "Red"
+                    return
+                }
                 $probe3 = Invoke-FollowProbe -Uri $resolved -CookieJar $cookieJar
                 if ($probe3.Body) {
                     $formHtml      = $probe3.Body
                     $portalBaseUrl = $probe3.EffectiveUrl
                 }
             }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($formHtml)) {
+            $global:LastAuthStatus = "PORTAL_REDIRECT_ERROR"
+            $global:LastAuthErrorDetail = "Unable to fetch captive portal form content."
         }
 
         # STEP 3: Parse HTML form action and hidden fields
@@ -554,14 +849,22 @@ function Invoke-UniLogin {
         # STEP 6: POST with full cookie jar and Referer header
         Invoke-PortalPost -ActionUrl $actionUrl -Body $postBody -CookieJar $cookieJar -Referer $portalBaseUrl
 
+        if ($global:LastAuthStatus -eq "INVALID_AUTH_ENDPOINT" -or $global:LastAuthStatus -eq "TLS_VALIDATION_FAILED") {
+            return
+        }
+
         # STEP 7: Verify connection
         Start-Sleep -Seconds 1
-        if (Test-IsOnline) {
+        if (Test-NetworkOnline -SSID $ssid) {
+            $global:LastAuthStatus = "SUCCESS"
+            $global:LastAuthErrorDetail = ""
             Write-UniLog "[+] Successfully connected! Internet is now active on $ssid." "Green"
             return
         }
         Start-Sleep -Seconds 2
-        if (Test-IsOnline) {
+        if (Test-NetworkOnline -SSID $ssid) {
+            $global:LastAuthStatus = "SUCCESS"
+            $global:LastAuthErrorDetail = ""
             Write-UniLog "[+] Successfully connected! Internet is now active on $ssid." "Green"
             return
         }
@@ -571,7 +874,12 @@ function Invoke-UniLogin {
             Start-Sleep -Seconds 2
         }
     }
-    Write-UniLog "Notice: Login credentials submitted. Please check connection status." "Yellow"
+
+    if ($global:LastAuthStatus -eq "UNKNOWN") {
+        $global:LastAuthStatus = "CONNECTIVITY_VERIFICATION_FAILED"
+        $global:LastAuthErrorDetail = "Verification probe failed to confirm internet access after $maxAttempts attempts."
+    }
+    Write-UniLog "Notice: Login credentials submitted. Status: $global:LastAuthStatus" "Yellow"
 }
 
 # ===========================================================================
@@ -610,11 +918,88 @@ function Show-UniStatus {
         }
     }
     if (Test-IsOnline) {
-        Write-Host "Internet:       ONLINE (Direct Internet Access confirmed)`n" -ForegroundColor Green
+        Write-Host "Internet:       ONLINE (Direct Internet Access confirmed)" -ForegroundColor Green
     } else {
-        Write-Host "Internet:       CAPTIVE PORTAL / OFFLINE`n" -ForegroundColor Yellow
+        Write-Host "Internet:       CAPTIVE PORTAL / OFFLINE" -ForegroundColor Yellow
     }
+    if ($global:LastAuthStatus -and $global:LastAuthStatus -ne "UNKNOWN") {
+        Write-Host "Last Auth:      $global:LastAuthStatus" -ForegroundColor $(if ($global:LastAuthStatus -eq "SUCCESS") { "Green" } else { "Yellow" })
+        if ($global:LastAuthErrorDetail) {
+            Write-Host "Diagnostics:    $global:LastAuthErrorDetail" -ForegroundColor Gray
+        }
+    }
+    Write-Host ""
     Test-VersionNotification
+}
+
+# ===========================================================================
+# TASK SCHEDULER — PER-USER INTERACTIVE REGISTRATION
+# ===========================================================================
+function Register-UniScheduledTask {
+    param([string]$InstallDir = "C:\ProgramData\uninet")
+    try {
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        if ([string]::IsNullOrWhiteSpace($currentUser)) {
+            $currentUser = "$env:USERDOMAIN\$env:USERNAME"
+        }
+        $userClean = $env:USERNAME
+        if (-not $userClean) { $userClean = ($currentUser -split '\\')[-1] }
+        $taskName  = "UniNetAutoConnect_$userClean"
+        $vbsDest   = "$InstallDir\uninet_silent.vbs"
+        $action    = "wscript.exe"
+        $arguments = "//nologo `"$vbsDest`""
+
+        # Check if vbs launcher exists
+        if (-not (Test-Path $vbsDest)) { return $false }
+
+        # Remove any legacy group task or previous per-user task
+        $null = cmd.exe /c "schtasks /delete /tn `"UniNetAutoConnect`" /f >nul 2>nul"
+        $null = cmd.exe /c "schtasks /delete /tn `"$taskName`" /f >nul 2>nul"
+
+        $taskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <EventTrigger>
+      <Enabled>true</Enabled>
+      <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational"&gt;&lt;Select Path="Microsoft-Windows-NetworkProfile/Operational"&gt;*[System[(EventID=10000)]]&lt;/Select&gt;&lt;/Query&gt;&lt;Query Id="1" Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;&lt;Select Path="Microsoft-Windows-WLAN-AutoConfig/Operational"&gt;*[System[(EventID=8001)]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
+    </EventTrigger>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT5S</Delay>
+      <UserId>$currentUser</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$currentUser</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>
+    <Hidden>true</Hidden>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$action</Command>
+      <Arguments>$arguments</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+        $tmpXml = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "uninet_task_$userClean.xml")
+        [System.IO.File]::WriteAllText($tmpXml, $taskXml, [System.Text.Encoding]::Unicode)
+        $null = cmd.exe /c "schtasks /create /tn `"$taskName`" /xml `"$tmpXml`" /f >nul 2>nul"
+        Remove-Item $tmpXml -Force -ErrorAction SilentlyContinue
+        return $true
+    } catch {
+        return $false
+    }
 }
 
 # ===========================================================================
@@ -650,16 +1035,46 @@ function Invoke-UniSetup {
         New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
     }
 
-    $data = @{ username = $username; password = $plainPass } | ConvertTo-Json
+    # Restrict ACL on user config directory
+    try {
+        $acl = Get-Acl $ConfigDir
+        $acl.SetAccessRuleProtection($true, $false)
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $userRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $acl.AddAccessRule($userRule)
+        $acl.AddAccessRule($adminRule)
+        Set-Acl -Path $ConfigDir -AclObject $acl
+    } catch { }
+
+    # Save credentials encrypted with DPAPI (CurrentUser scope)
+    try {
+        $encPass = Protect-Secret $plainPass
+        if ([string]::IsNullOrEmpty($encPass)) {
+            Write-Host "Error: Failed to encrypt credentials. Setup aborted." -ForegroundColor Red
+            return
+        }
+    } catch {
+        Write-Host "Security Error: Credential protection failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Credentials were NOT stored to prevent plaintext exposure." -ForegroundColor Yellow
+        return
+    }
+
+    $isEncrypted = ($encPass -ne $plainPass)
+    if ([Environment]::OSVersion.Platform -eq "Win32NT" -and -not $isEncrypted) {
+        Write-Host "Security Error: DPAPI encryption was bypassed on Windows. Setup aborted." -ForegroundColor Red
+        return
+    }
+
+    $data = @{ username = $username; password = $encPass; encrypted = $isEncrypted } | ConvertTo-Json
 
     Set-Content -Path $CredsFile -Value $data -Encoding UTF8
 
-    # FIX 7: Always write to ProgramData — Task Scheduler reads from here
-    $sysDir = "C:\ProgramData\uninet"
-    if (-not (Test-Path $sysDir)) {
-        New-Item -ItemType Directory -Path $sysDir -Force -ErrorAction SilentlyContinue | Out-Null
-    }
-    Set-Content -Path "$sysDir\credentials.json" -Value $data -Encoding UTF8 -ErrorAction SilentlyContinue
+    # Security: Remove any legacy shared credentials file in ProgramData
+    Remove-Item -Path $SysCredsFile -Force -ErrorAction SilentlyContinue
+
+    # Register per-user auto-connect task in Task Scheduler
+    Register-UniScheduledTask
 
     # Attempt login immediately if on campus Wi-Fi
     if ($ssid -and (Test-UniversityNetwork $ssid)) {
@@ -867,6 +1282,9 @@ function Invoke-UniUninstall {
     $InstallDir = "C:\ProgramData\uninet"
 
     $null = cmd.exe /c "schtasks /delete /tn `"$TaskName`" /f >nul 2>nul"
+    if ($env:USERNAME) {
+        $null = cmd.exe /c "schtasks /delete /tn `"UniNetAutoConnect_$($env:USERNAME)`" /f >nul 2>nul"
+    }
     foreach ($ssid in @("UoM_Wireless", "UoM.Wireless", "UoM-Wireless")) {
         $null = cmd.exe /c "netsh wlan delete profile name=`"$ssid`" >nul 2>nul"
     }

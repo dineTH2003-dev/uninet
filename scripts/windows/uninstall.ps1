@@ -4,9 +4,12 @@
 
 Write-Host "Uninstalling UniNet for Windows..." -ForegroundColor Yellow
 
-# Remove scheduled task
+# Remove scheduled tasks (legacy and per-user)
 $TaskName = "UniNetAutoConnect"
 $null = cmd.exe /c "schtasks /delete /tn `"$TaskName`" /f >nul 2>nul"
+if ($env:USERNAME) {
+    $null = cmd.exe /c "schtasks /delete /tn `"UniNetAutoConnect_$($env:USERNAME)`" /f >nul 2>nul"
+}
 
 # Remove WLAN profiles registered by 'uninet setup' / 'uninet trust'
 foreach ($ssid in @("UoM_Wireless", "UoM.Wireless", "UoM-Wireless")) {
