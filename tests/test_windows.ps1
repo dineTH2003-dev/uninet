@@ -15,7 +15,43 @@ try {
 } catch { }
 
 # Resolve Python executable for cross-platform mock servers
-$global:pyExe = if (Get-Command "python" -ErrorAction SilentlyContinue) { "python" } elseif (Get-Command "python3" -ErrorAction SilentlyContinue) { "python3" } elseif (Get-Command "py" -ErrorAction SilentlyContinue) { "py" } else { "python" }
+$cmd = Get-Command python, python3, py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+$global:pyExe = if ($cmd) { $cmd.Source } else { "python" }
+
+function Start-MockHttpServer([string]$ScriptContent, [string]$FileName, [int]$Port) {
+    $tempPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), $FileName)
+    Set-Content -Path $tempPy -Value $ScriptContent -Encoding UTF8
+    $proc = Start-Process -FilePath $global:pyExe -ArgumentList "`"$tempPy`"" -PassThru
+
+    # Wait for the server socket to become available (up to 5 seconds)
+    for ($i = 0; $i -lt 25; $i++) {
+        if ($proc.HasExited) { break }
+        try {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $asyncResult = $tcp.BeginConnect("127.0.0.1", $Port, $null, $null)
+            $waitSuccess = $asyncResult.AsyncWaitHandle.WaitOne(200, $false)
+            if ($waitSuccess -and $tcp.Connected) {
+                $tcp.EndConnect($asyncResult)
+                $tcp.Close()
+                break
+            }
+            $tcp.Close()
+        } catch { }
+        Start-Sleep -Milliseconds 150
+    }
+    return [PSCustomObject]@{ Process = $proc; File = $tempPy }
+}
+
+function Stop-MockHttpServer($serverObj) {
+    if ($serverObj) {
+        if ($serverObj.Process -and -not $serverObj.Process.HasExited) {
+            Stop-Process -Id $serverObj.Process.Id -Force -ErrorAction SilentlyContinue
+        }
+        if ($serverObj.File -and (Test-Path $serverObj.File)) {
+            Remove-Item $serverObj.File -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..")).Path
@@ -227,11 +263,7 @@ s = http.server.HTTPServer(('127.0.0.1', $port), MockPortal)
 s.serve_forever()
 "@
 
-$tempServerPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_portal.py")
-Set-Content -Path $tempServerPy -Value $serverScript -Encoding UTF8
-
-$proc = Start-Process -FilePath $global:pyExe -ArgumentList "`"$tempServerPy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockServer = Start-MockHttpServer -ScriptContent $serverScript -FileName "mock_portal.py" -Port $port
 
 try {
     $cookieJar = New-Object System.Net.CookieContainer
@@ -263,10 +295,7 @@ try {
     Assert-Condition ([int]$onlineResp.StatusCode -eq 204) "Authentication succeeded; Internet probe returns HTTP 204"
     $onlineResp.Close()
 } finally {
-    if ($proc -and -not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $tempServerPy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockServer
 }
 
 
@@ -378,10 +407,7 @@ s = http.server.HTTPServer(('127.0.0.1', $ciscoPort), CiscoHandler)
 s.serve_forever()
 "@
 
-$ciscoPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_cisco.py")
-Set-Content -Path $ciscoPy -Value $ciscoServerScript -Encoding UTF8
-$procCisco = Start-Process -FilePath $global:pyExe -ArgumentList "`"$ciscoPy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockCisco = Start-MockHttpServer -ScriptContent $ciscoServerScript -FileName "mock_cisco.py" -Port $ciscoPort
 
 $ciscoCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "cisco_creds.json")
 New-TestCredentialsFile -FilePath $ciscoCredsFile -Username "student_cisco" -Password "CiscoPassword123!"
@@ -404,10 +430,7 @@ try {
         "Cisco portal confirms online status (HTTP 204)"
     $vResp.Close()
 } finally {
-    if ($procCisco -and -not $procCisco.HasExited) {
-        Stop-Process -Id $procCisco.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $ciscoPy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockCisco
     Remove-Item $ciscoCredsFile -Force -ErrorAction SilentlyContinue
     $env:UNINET_TEST_SSID = $null
     $env:UNINET_TEST_PROBE_URL = $null
@@ -473,10 +496,7 @@ s = http.server.HTTPServer(('127.0.0.1', $arubaPort), ArubaHandler)
 s.serve_forever()
 "@
 
-$arubaPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_aruba.py")
-Set-Content -Path $arubaPy -Value $arubaServerScript -Encoding UTF8
-$procAruba = Start-Process -FilePath $global:pyExe -ArgumentList "`"$arubaPy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockAruba = Start-MockHttpServer -ScriptContent $arubaServerScript -FileName "mock_aruba.py" -Port $arubaPort
 
 $arubaCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "aruba_creds.json")
 New-TestCredentialsFile -FilePath $arubaCredsFile -Username "student_aruba" -Password "ArubaPassword456!"
@@ -499,10 +519,7 @@ try {
         "Aruba portal confirms online status (HTTP 204)"
     $vResp.Close()
 } finally {
-    if ($procAruba -and -not $procAruba.HasExited) {
-        Stop-Process -Id $procAruba.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $arubaPy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockAruba
     Remove-Item $arubaCredsFile -Force -ErrorAction SilentlyContinue
     $env:UNINET_TEST_SSID = $null
     $env:UNINET_TEST_ARUBA_PROBE_URL = $null
@@ -562,10 +579,7 @@ s = http.server.HTTPServer(('127.0.0.1', $roguePort), RogueHandler)
 s.serve_forever()
 "@
 
-$roguePy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_rogue.py")
-Set-Content -Path $roguePy -Value $rogueServerScript -Encoding UTF8
-$procRogue = Start-Process -FilePath $global:pyExe -ArgumentList "`"$roguePy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockRogue = Start-MockHttpServer -ScriptContent $rogueServerScript -FileName "mock_rogue.py" -Port $roguePort
 
 $testCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "test_creds.json")
 New-TestCredentialsFile -FilePath $testCredsFile -Username "student" -Password "password"
@@ -580,10 +594,7 @@ try {
     Assert-Condition ($global:LastAuthStatus -eq "UNTRUSTED_REDIRECT") `
         "Security Guardrail: Invoke-UniLogin blocks untrusted external redirect domain before landing probe" $global:LastAuthStatus
 } finally {
-    if ($procRogue -and -not $procRogue.HasExited) {
-        Stop-Process -Id $procRogue.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $roguePy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockRogue
     Remove-Item $testCredsFile -Force -ErrorAction SilentlyContinue
     $env:UNINET_TEST_SSID = $null
     $env:UNINET_TEST_PROBE_URL = $null
@@ -683,10 +694,7 @@ s = http.server.HTTPServer(('127.0.0.1', $onlinePort), OnlineHandler)
 s.serve_forever()
 "@
 
-$onlinePy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_online.py")
-Set-Content -Path $onlinePy -Value $onlineScript -Encoding UTF8
-$procOnline = Start-Process -FilePath $global:pyExe -ArgumentList "`"$onlinePy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockOnline = Start-MockHttpServer -ScriptContent $onlineScript -FileName "mock_online.py" -Port $onlinePort
 
 $onlineCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "online_creds.json")
 New-TestCredentialsFile -FilePath $onlineCredsFile -Username "student" -Password "password"
@@ -701,10 +709,7 @@ try {
     Assert-Condition ($global:LastAuthStatus -eq "SUCCESS") `
         "Already-online connection detected immediately with SUCCESS status"
 } finally {
-    if ($procOnline -and -not $procOnline.HasExited) {
-        Stop-Process -Id $procOnline.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $onlinePy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockOnline
     Remove-Item $onlineCredsFile -Force -ErrorAction SilentlyContinue
     $env:UNINET_TEST_SSID = $null
     $env:UNINET_TEST_PROBE_URL = $null
@@ -750,10 +755,7 @@ s = http.server.HTTPServer(('127.0.0.1', $rejectPort), RejectHandler)
 s.serve_forever()
 "@
 
-$rejectPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_reject.py")
-Set-Content -Path $rejectPy -Value $rejectScript -Encoding UTF8
-$procReject = Start-Process -FilePath $global:pyExe -ArgumentList "`"$rejectPy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockReject = Start-MockHttpServer -ScriptContent $rejectScript -FileName "mock_reject.py" -Port $rejectPort
 
 $rejectCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "reject_creds.json")
 New-TestCredentialsFile -FilePath $rejectCredsFile -Username "wrong_student" -Password "bad_password"
@@ -768,10 +770,7 @@ try {
     Assert-Condition ($global:LastAuthStatus -eq "AUTHENTICATION_REJECTED") `
         "Captive portal HTTP 401 sets AUTHENTICATION_REJECTED state"
 } finally {
-    if ($procReject -and -not $procReject.HasExited) {
-        Stop-Process -Id $procReject.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $rejectPy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockReject
     Remove-Item $rejectCredsFile -Force -ErrorAction SilentlyContinue
     $env:UNINET_TEST_SSID = $null
     $env:UNINET_TEST_PROBE_URL = $null
@@ -819,10 +818,7 @@ s = http.server.HTTPServer(('127.0.0.1', $unverifiedPort), UnverifiedHandler)
 s.serve_forever()
 "@
 
-$unverifiedPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_unverified.py")
-Set-Content -Path $unverifiedPy -Value $unverifiedScript -Encoding UTF8
-$procUnverified = Start-Process -FilePath $global:pyExe -ArgumentList "`"$unverifiedPy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockUnverified = Start-MockHttpServer -ScriptContent $unverifiedScript -FileName "mock_unverified.py" -Port $unverifiedPort
 
 $unverifiedCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "unverified_creds.json")
 New-TestCredentialsFile -FilePath $unverifiedCredsFile -Username "student" -Password "password"
@@ -837,10 +833,7 @@ try {
     Assert-Condition ($global:LastAuthStatus -eq "CONNECTIVITY_VERIFICATION_FAILED") `
         "State machine records CONNECTIVITY_VERIFICATION_FAILED when probes fail post-login"
 } finally {
-    if ($procUnverified -and -not $procUnverified.HasExited) {
-        Stop-Process -Id $procUnverified.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $unverifiedPy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockUnverified
     Remove-Item $unverifiedCredsFile -Force -ErrorAction SilentlyContinue
     $env:UNINET_TEST_SSID = $null
     $env:UNINET_TEST_PROBE_URL = $null
@@ -877,10 +870,7 @@ s = http.server.HTTPServer(('127.0.0.1', $phishingActionPort), PhishingActionHan
 s.serve_forever()
 "@
 
-$phishingActionPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_phishing_action.py")
-Set-Content -Path $phishingActionPy -Value $phishingActionScript -Encoding UTF8
-$procPhishing = Start-Process -FilePath $global:pyExe -ArgumentList "`"$phishingActionPy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockPhishing = Start-MockHttpServer -ScriptContent $phishingActionScript -FileName "mock_phishing_action.py" -Port $phishingActionPort
 
 $phishingCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "phishing_creds.json")
 New-TestCredentialsFile -FilePath $phishingCredsFile -Username "student" -Password "password"
@@ -895,10 +885,7 @@ try {
     Assert-Condition ($global:LastAuthStatus -eq "INVALID_AUTH_ENDPOINT") `
         "Security Guardrail: Invoke-PortalPost blocks untrusted form action destination"
 } finally {
-    if ($procPhishing -and -not $procPhishing.HasExited) {
-        Stop-Process -Id $procPhishing.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $phishingActionPy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockPhishing
     Remove-Item $phishingCredsFile -Force -ErrorAction SilentlyContinue
     $env:UNINET_TEST_SSID = $null
     $env:UNINET_TEST_PROBE_URL = $null
@@ -966,10 +953,7 @@ s = http.server.HTTPServer(('127.0.0.1', $metaPort), MetaHandler)
 s.serve_forever()
 "@
 
-$metaPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_meta.py")
-Set-Content -Path $metaPy -Value $metaScript -Encoding UTF8
-$procMeta = Start-Process -FilePath $global:pyExe -ArgumentList "`"$metaPy`"" -PassThru
-Start-Sleep -Seconds 1
+$mockMeta = Start-MockHttpServer -ScriptContent $metaScript -FileName "mock_meta.py" -Port $metaPort
 
 $metaCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "meta_creds.json")
 New-TestCredentialsFile -FilePath $metaCredsFile -Username "student" -Password "password"
@@ -984,10 +968,7 @@ try {
     Assert-Condition ($global:LastAuthStatus -eq "UNTRUSTED_REDIRECT") `
         "Security Guardrail: Invoke-UniLogin blocks meta-refresh redirect to untrusted domain"
 } finally {
-    if ($procMeta -and -not $procMeta.HasExited) {
-        Stop-Process -Id $procMeta.Id -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $metaPy -Force -ErrorAction SilentlyContinue
+    Stop-MockHttpServer $mockMeta
     Remove-Item $metaCredsFile -Force -ErrorAction SilentlyContinue
     $env:UNINET_TEST_SSID = $null
     $env:UNINET_TEST_PROBE_URL = $null
