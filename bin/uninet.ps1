@@ -97,6 +97,9 @@ function Initialize-UniTlsCallback {
     } catch { }
 }
 Initialize-UniTlsCallback
+try {
+    [System.Net.WebRequest]::DefaultWebProxy = $null
+} catch { }
 
 # ===========================================================================
 # UTILITY FUNCTIONS
@@ -179,6 +182,7 @@ function Test-IsOnline {
     try {
         $targetProbe = if ($env:UNINET_TEST_PROBE_URL) { $env:UNINET_TEST_PROBE_URL } else { $ProbeUrl }
         $req = [System.Net.HttpWebRequest]::Create($targetProbe)
+        $req.Proxy   = $null
         $req.Timeout = 4000
         $req.Method  = "GET"
         $req.AllowAutoRedirect = $false
@@ -199,6 +203,7 @@ function Test-ArubaOnline {
     try {
         $targetProbe = if ($env:UNINET_TEST_ARUBA_PROBE_URL) { $env:UNINET_TEST_ARUBA_PROBE_URL } else { $ArubaProbeUrl }
         $req = [System.Net.HttpWebRequest]::Create($targetProbe)
+        $req.Proxy   = $null
         $req.Timeout = 4000
         $req.Method  = "GET"
         $req.AllowAutoRedirect = $false
@@ -373,6 +378,7 @@ function Invoke-NoFollowProbe {
     $result = [PSCustomObject]@{ StatusCode = 0; Location = ""; SetCookies = @() }
     try {
         $req = [System.Net.HttpWebRequest]::Create([System.Uri]$Uri)
+        $req.Proxy              = $null
         $req.Method             = "GET"
         $req.AllowAutoRedirect  = $false
         $req.Timeout            = 8000
@@ -431,6 +437,7 @@ function Invoke-FollowProbe {
     $result = [PSCustomObject]@{ StatusCode = 0; EffectiveUrl = $Uri; Body = "" }
     try {
         $req = [System.Net.HttpWebRequest]::Create([System.Uri]$Uri)
+        $req.Proxy                       = $null
         $req.Method                      = "GET"
         $req.AllowAutoRedirect           = $true
         $req.MaximumAutomaticRedirections = 8
@@ -502,6 +509,7 @@ function Invoke-PortalPost {
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($encoded)
 
         $req = [System.Net.HttpWebRequest]::Create([System.Uri]$ActionUrl)
+        $req.Proxy           = $null
         $req.Method          = "POST"
         $req.ContentType     = "application/x-www-form-urlencoded"
         $req.ContentLength   = $bodyBytes.Length

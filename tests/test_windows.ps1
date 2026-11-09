@@ -14,6 +14,11 @@ try {
     Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 } catch { }
 
+# Disable default web proxy to eliminate WPAD auto-detection delays on Windows .NET Framework
+try {
+    [System.Net.WebRequest]::DefaultWebProxy = $null
+} catch { }
+
 # Resolve Python executable for cross-platform mock servers
 $cmd = Get-Command python, python3, py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 $global:pyExe = if ($cmd) { $cmd.Source } else { "python" }
@@ -291,7 +296,7 @@ try {
 
     # Step 1: Probe without redirect
     $probe1 = Invoke-NoFollowProbe -Uri "http://127.0.0.1:$port/generate_204" -CookieJar $cookieJar
-    Assert-Condition ($probe1.StatusCode -eq 302) "Probe 1 returned HTTP 302 Redirect"
+    Assert-Condition ($probe1.StatusCode -eq 302) "Probe 1 returned HTTP 302 Redirect" "StatusCode=$($probe1.StatusCode)"
     Assert-Condition ($probe1.Location -eq "http://127.0.0.1:$port/login.html") "Probe 1 captured Location header" $probe1.Location
 
     # Step 2: Follow probe using captured/resolved URL
@@ -311,6 +316,7 @@ try {
 
     # Step 4: Verify post-login status (should return HTTP 204 now)
     $onlineCheck = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$port/generate_204")
+    $onlineCheck.Proxy = $null
     $onlineCheck.AllowAutoRedirect = $false
     $onlineResp = $onlineCheck.GetResponse()
     Assert-Condition ([int]$onlineResp.StatusCode -eq 204) "Authentication succeeded; Internet probe returns HTTP 204"
@@ -448,6 +454,7 @@ try {
 
     # Verify post-login state on server
     $verifyProbe = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$ciscoPort/generate_204")
+    $verifyProbe.Proxy = $null
     $verifyProbe.AllowAutoRedirect = $false
     $vResp = $verifyProbe.GetResponse()
     Assert-Condition ([int]$vResp.StatusCode -eq 204) `
@@ -540,6 +547,7 @@ try {
 
     # Verify post-login state on server
     $verifyProbe = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$arubaPort/ubuntu_probe")
+    $verifyProbe.Proxy = $null
     $verifyProbe.AllowAutoRedirect = $false
     $vResp = $verifyProbe.GetResponse()
     Assert-Condition ([int]$vResp.StatusCode -eq 204) `
