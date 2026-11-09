@@ -384,7 +384,7 @@ function Invoke-NoFollowProbe {
         $req.Timeout            = 8000
         $req.CookieContainer    = $CookieJar
         $req.UserAgent          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        $req.Headers.Add("Accept", "text/html,application/xhtml+xml,*/*")
+        $req.Accept             = "text/html,application/xhtml+xml,*/*"
 
         $resp = $null
         try { $resp = $req.GetResponse() }
@@ -423,6 +423,8 @@ function Invoke-NoFollowProbe {
             $_.Exception.Message -match 'trust relationship|SSL/TLS') {
             $global:LastAuthStatus = "TLS_VALIDATION_FAILED"
             $global:LastAuthErrorDetail = "TLS validation failed for probe '$Uri'."
+        } else {
+            $global:LastAuthErrorDetail = "Probe exception: $($_.Exception.Message)"
         }
     }
     return $result
@@ -444,7 +446,7 @@ function Invoke-FollowProbe {
         $req.Timeout                     = 10000
         $req.CookieContainer             = $CookieJar
         $req.UserAgent                   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        $req.Headers.Add("Accept", "text/html,application/xhtml+xml,*/*")
+        $req.Accept                      = "text/html,application/xhtml+xml,*/*"
 
         $resp = $null
         try { $resp = $req.GetResponse() }
@@ -519,7 +521,7 @@ function Invoke-PortalPost {
         $req.CookieContainer = $CookieJar
         $req.UserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         if ($Referer) { $req.Referer = $Referer }
-        $req.Headers.Add("Accept", "text/html,application/xhtml+xml,*/*")
+        $req.Accept          = "text/html,application/xhtml+xml,*/*"
 
         $stream = $req.GetRequestStream()
         $stream.Write($bodyBytes, 0, $bodyBytes.Length)
