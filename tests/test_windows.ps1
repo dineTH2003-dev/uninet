@@ -29,8 +29,8 @@ Write-Host "========================================================`n" -Foregro
 $coreContent = Get-Content -Raw -Path $CoreScript
 
 # Extract function definitions using PowerShell AST
-$tokens = $null
-$errors = $null
+[System.Management.Automation.Language.Token[]]$tokens = @()
+[System.Management.Automation.Language.ParseError[]]$errors = @()
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($coreContent, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) {
     Write-Error "Syntax error in bin\uninet.ps1: $errors"

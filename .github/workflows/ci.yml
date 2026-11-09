@@ -41,13 +41,13 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Validate PowerShell 5.1 Scripts & Tests
+      - name: AST Syntax Check (PowerShell 5.1)
         shell: powershell
         run: |
-          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")
+          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1", "tests\test_windows.ps1")
           foreach ($s in $scripts) {
-              $tokens = $null
-              $errors = $null
+              [System.Management.Automation.Language.Token[]]$tokens = @()
+              [System.Management.Automation.Language.ParseError[]]$errors = @()
               $fullPath = (Resolve-Path $s).Path
               $ast = [System.Management.Automation.Language.Parser]::ParseFile($fullPath, [ref]$tokens, [ref]$errors)
               if ($errors.Count -gt 0) {
@@ -57,11 +57,23 @@ jobs:
               Write-Host "[+] $s passed AST syntax validation"
           }
 
-          # Verify runtime execution in Windows PowerShell 5.1
+      - name: CLI Help Execution Check (PowerShell 5.1)
+        shell: powershell
+        run: |
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\bin\uninet.ps1" help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\tests\test_windows.ps1"
+
+      - name: Run Windows Test Suite (PowerShell 5.1)
+        shell: powershell
+        run: |
+          $out = & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\tests\test_windows.ps1" 2>&1
+          $out | Out-String | Add-Content $env:GITHUB_STEP_SUMMARY
+          $out | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Uninstaller Execution Check (PowerShell 5.1)
+        shell: powershell
+        run: |
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\scripts\windows\uninstall.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -72,13 +84,13 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Validate PowerShell 7+ Scripts & Tests
+      - name: AST Syntax Check (PowerShell 7+)
         shell: pwsh
         run: |
-          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")
+          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1", "tests\test_windows.ps1")
           foreach ($s in $scripts) {
-              $tokens = $null
-              $errors = $null
+              [System.Management.Automation.Language.Token[]]$tokens = @()
+              [System.Management.Automation.Language.ParseError[]]$errors = @()
               $fullPath = (Resolve-Path $s).Path
               $ast = [System.Management.Automation.Language.Parser]::ParseFile($fullPath, [ref]$tokens, [ref]$errors)
               if ($errors.Count -gt 0) {
@@ -88,10 +100,22 @@ jobs:
               Write-Host "[+] $s passed AST syntax validation"
           }
 
-          # Verify runtime execution in PowerShell 7+
+      - name: CLI Help Execution Check (PowerShell 7+)
+        shell: pwsh
+        run: |
           & pwsh -NoProfile -File ".\bin\uninet.ps1" help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & pwsh -NoProfile -File ".\tests\test_windows.ps1"
+
+      - name: Run Windows Test Suite (PowerShell 7+)
+        shell: pwsh
+        run: |
+          $out = & pwsh -NoProfile -File ".\tests\test_windows.ps1" 2>&1
+          $out | Out-String | Add-Content $env:GITHUB_STEP_SUMMARY
+          $out | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Uninstaller Execution Check (PowerShell 7+)
+        shell: pwsh
+        run: |
           & pwsh -NoProfile -File ".\scripts\windows\uninstall.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
