@@ -18,28 +18,40 @@ try {
 $cmd = Get-Command python, python3, py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 $global:pyExe = if ($cmd) { $cmd.Source } else { "python" }
 
-function Start-MockHttpServer([string]$ScriptContent, [string]$FileName, [int]$Port) {
-    $tempPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), $FileName)
-    Set-Content -Path $tempPy -Value $ScriptContent -Encoding UTF8
-    $proc = Start-Process -FilePath $global:pyExe -ArgumentList "`"$tempPy`"" -PassThru
+function Start-MockHttpServer([string]$ScriptContent, [string]$FileName) {
+    $tempDir  = [System.IO.Path]::GetTempPath()
+    $portFile = [System.IO.Path]::Combine($tempDir, "$FileName.port")
+    $errFile  = [System.IO.Path]::Combine($tempDir, "$FileName.err")
+    $tempPy   = [System.IO.Path]::Combine($tempDir, $FileName)
 
-    # Wait for the server socket to become available (up to 5 seconds)
-    for ($i = 0; $i -lt 25; $i++) {
+    if (Test-Path $portFile) { Remove-Item $portFile -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $errFile)  { Remove-Item $errFile -Force -ErrorAction SilentlyContinue }
+
+    Set-Content -Path $tempPy -Value $ScriptContent -Encoding UTF8
+    $proc = Start-Process -FilePath $global:pyExe -ArgumentList "`"$tempPy`" `"$portFile`"" `
+        -RedirectStandardError $errFile -PassThru
+
+    $port = 0
+    for ($i = 0; $i -lt 50; $i++) {
         if ($proc.HasExited) { break }
-        try {
-            $tcp = New-Object System.Net.Sockets.TcpClient
-            $asyncResult = $tcp.BeginConnect("127.0.0.1", $Port, $null, $null)
-            $waitSuccess = $asyncResult.AsyncWaitHandle.WaitOne(200, $false)
-            if ($waitSuccess -and $tcp.Connected) {
-                $tcp.EndConnect($asyncResult)
-                $tcp.Close()
-                break
-            }
-            $tcp.Close()
-        } catch { }
-        Start-Sleep -Milliseconds 150
+        if (Test-Path $portFile) {
+            try {
+                $raw = (Get-Content -Path $portFile -ErrorAction SilentlyContinue -Raw).Trim()
+                if ($raw -match '^\d+$') {
+                    $port = [int]$raw
+                    break
+                }
+            } catch { }
+        }
+        Start-Sleep -Milliseconds 100
     }
-    return [PSCustomObject]@{ Process = $proc; File = $tempPy }
+
+    if ($port -eq 0) {
+        $errOut = if (Test-Path $errFile) { Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue } else { "" }
+        Write-Error "Failed to start mock HTTP server ($FileName). Process exited: $($proc.HasExited), ExitCode: $($proc.ExitCode). Stderr: $errOut"
+    }
+
+    return [PSCustomObject]@{ Process = $proc; File = $tempPy; PortFile = $portFile; ErrFile = $errFile; Port = $port }
 }
 
 function Stop-MockHttpServer($serverObj) {
@@ -49,6 +61,12 @@ function Stop-MockHttpServer($serverObj) {
         }
         if ($serverObj.File -and (Test-Path $serverObj.File)) {
             Remove-Item $serverObj.File -Force -ErrorAction SilentlyContinue
+        }
+        if ($serverObj.PortFile -and (Test-Path $serverObj.PortFile)) {
+            Remove-Item $serverObj.PortFile -Force -ErrorAction SilentlyContinue
+        }
+        if ($serverObj.ErrFile -and (Test-Path $serverObj.ErrFile)) {
+            Remove-Item $serverObj.ErrFile -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -213,9 +231,8 @@ Assert-Condition ($encodedString -like "*password=P%40ss%26w%2Brd%3D123%25%20%22
 Write-Host "`n[Test 4] Mock Server Captive Portal & Cookie Propagation" -ForegroundColor Cyan
 
 # Start a local Python mock server
-$port = 18092
 $serverScript = @"
-import http.server, threading
+import http.server, sys
 
 auth_state = {'logged_in': False, 'cookie_seen': False}
 
@@ -228,7 +245,7 @@ class MockPortal(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
             else:
                 self.send_response(302)
-                self.send_header('Location', 'http://127.0.0.1:$port/login.html')
+                self.send_header('Location', 'http://127.0.0.1:{}/login.html'.format(self.server.server_port))
                 self.send_header('Set-Cookie', 'PORTAL_SESS=token_xyz_789; Path=/')
                 self.end_headers()
         elif self.path == '/login.html':
@@ -259,11 +276,15 @@ class MockPortal(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $port), MockPortal)
+s = http.server.HTTPServer(('127.0.0.1', 0), MockPortal)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockServer = Start-MockHttpServer -ScriptContent $serverScript -FileName "mock_portal.py" -Port $port
+$mockServer = Start-MockHttpServer -ScriptContent $serverScript -FileName "mock_portal.py"
+$port = $mockServer.Port
 
 try {
     $cookieJar = New-Object System.Net.CookieContainer
@@ -358,7 +379,6 @@ Assert-Condition ($diff -ge 15.0) `
 # ------------------------------------------------------------------------------
 Write-Host "`n[Test 7] End-to-End Cisco/NEC WebAuth Portal Automation (Invoke-UniLogin)" -ForegroundColor Cyan
 
-$ciscoPort = 18093
 $ciscoServerScript = @"
 import http.server, urllib.parse, sys
 
@@ -373,7 +393,7 @@ class CiscoHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
             else:
                 self.send_response(302)
-                self.send_header('Location', 'http://127.0.0.1:$ciscoPort/login.html')
+                self.send_header('Location', 'http://127.0.0.1:{}/login.html'.format(self.server.server_port))
                 self.end_headers()
         elif self.path == '/login.html':
             self.send_response(200)
@@ -403,11 +423,15 @@ class CiscoHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $ciscoPort), CiscoHandler)
+s = http.server.HTTPServer(('127.0.0.1', 0), CiscoHandler)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockCisco = Start-MockHttpServer -ScriptContent $ciscoServerScript -FileName "mock_cisco.py" -Port $ciscoPort
+$mockCisco = Start-MockHttpServer -ScriptContent $ciscoServerScript -FileName "mock_cisco.py"
+$ciscoPort = $mockCisco.Port
 
 $ciscoCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "cisco_creds.json")
 New-TestCredentialsFile -FilePath $ciscoCredsFile -Username "student_cisco" -Password "CiscoPassword123!"
@@ -443,9 +467,8 @@ try {
 # ------------------------------------------------------------------------------
 Write-Host "`n[Test 8] End-to-End Aruba Networks Portal Automation (Invoke-UniLogin)" -ForegroundColor Cyan
 
-$arubaPort = 18094
 $arubaServerScript = @"
-import http.server, urllib.parse
+import http.server, urllib.parse, sys
 
 auth_state = {'logged_in': False, 'cmd': None, 'mac': None, 'cookie_seen': False}
 
@@ -458,7 +481,7 @@ class ArubaHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
             else:
                 self.send_response(302)
-                self.send_header('Location', 'http://127.0.0.1:$arubaPort/cgi-bin/login?cmd=login&mac=11%3A22%3A33%3A44%3A55%3A66&ip=10.200.1.42&essid=UoM.Wireless&url=http%3A%2F%2Fconnectivity-check.ubuntu.com')
+                self.send_header('Location', 'http://127.0.0.1:{}/cgi-bin/login?cmd=login&mac=11%3A22%3A33%3A44%3A55%3A66&ip=10.200.1.42&essid=UoM.Wireless&url=http%3A%2F%2Fconnectivity-check.ubuntu.com'.format(self.server.server_port))
                 self.send_header('Set-Cookie', 'ARUBA_SESSION=aruba_sec_tok; Path=/')
                 self.end_headers()
         elif self.path.startswith('/cgi-bin/login'):
@@ -492,11 +515,15 @@ class ArubaHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $arubaPort), ArubaHandler)
+s = http.server.HTTPServer(('127.0.0.1', 0), ArubaHandler)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockAruba = Start-MockHttpServer -ScriptContent $arubaServerScript -FileName "mock_aruba.py" -Port $arubaPort
+$mockAruba = Start-MockHttpServer -ScriptContent $arubaServerScript -FileName "mock_aruba.py"
+$arubaPort = $mockAruba.Port
 
 $arubaCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "aruba_creds.json")
 New-TestCredentialsFile -FilePath $arubaCredsFile -Username "student_aruba" -Password "ArubaPassword456!"
@@ -559,10 +586,8 @@ $CredsFile = $origCreds
 $SysCredsFile = $origSysCreds
 $env:UNINET_TEST_CREDS_FILE = $null
 
-# 9.4 Negative Security: Rogue AP untrusted endpoint blocking
-$roguePort = 18095
 $rogueServerScript = @"
-import http.server
+import http.server, sys
 
 class RogueHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -575,11 +600,15 @@ class RogueHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $roguePort), RogueHandler)
+s = http.server.HTTPServer(('127.0.0.1', 0), RogueHandler)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockRogue = Start-MockHttpServer -ScriptContent $rogueServerScript -FileName "mock_rogue.py" -Port $roguePort
+$mockRogue = Start-MockHttpServer -ScriptContent $rogueServerScript -FileName "mock_rogue.py"
+$roguePort = $mockRogue.Port
 
 $testCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "test_creds.json")
 New-TestCredentialsFile -FilePath $testCredsFile -Username "student" -Password "password"
@@ -676,9 +705,8 @@ Assert-Condition ($corruptedResult -eq $null -or -not ([Environment]::OSVersion.
 # ------------------------------------------------------------------------------
 Write-Host "`n[Test 12] Already-Online Network Bypass" -ForegroundColor Cyan
 
-$onlinePort = 18096
 $onlineScript = @"
-import http.server
+import http.server, sys
 
 class OnlineHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -690,11 +718,15 @@ class OnlineHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $onlinePort), OnlineHandler)
+s = http.server.HTTPServer(('127.0.0.1', 0), OnlineHandler)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockOnline = Start-MockHttpServer -ScriptContent $onlineScript -FileName "mock_online.py" -Port $onlinePort
+$mockOnline = Start-MockHttpServer -ScriptContent $onlineScript -FileName "mock_online.py"
+$onlinePort = $mockOnline.Port
 
 $onlineCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "online_creds.json")
 New-TestCredentialsFile -FilePath $onlineCredsFile -Username "student" -Password "password"
@@ -722,16 +754,15 @@ try {
 # ------------------------------------------------------------------------------
 Write-Host "`n[Test 13] Portal HTTP 401/403 Authentication Rejection" -ForegroundColor Cyan
 
-$rejectPort = 18097
 $rejectScript = @"
-import http.server
+import http.server, sys
 
 class RejectHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == '/generate_204':
             self.send_response(302)
-            self.send_header('Location', 'http://127.0.0.1:$rejectPort/login.html')
+            self.send_header('Location', 'http://127.0.0.1:{}/login.html'.format(self.server.server_port))
             self.end_headers()
         elif self.path == '/login.html':
             self.send_response(200)
@@ -751,11 +782,15 @@ class RejectHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $rejectPort), RejectHandler)
+s = http.server.HTTPServer(('127.0.0.1', 0), RejectHandler)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockReject = Start-MockHttpServer -ScriptContent $rejectScript -FileName "mock_reject.py" -Port $rejectPort
+$mockReject = Start-MockHttpServer -ScriptContent $rejectScript -FileName "mock_reject.py"
+$rejectPort = $mockReject.Port
 
 $rejectCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "reject_creds.json")
 New-TestCredentialsFile -FilePath $rejectCredsFile -Username "wrong_student" -Password "bad_password"
@@ -783,9 +818,8 @@ try {
 # ------------------------------------------------------------------------------
 Write-Host "`n[Test 14] Failed Post-Login Verification" -ForegroundColor Cyan
 
-$unverifiedPort = 18098
 $unverifiedScript = @"
-import http.server
+import http.server, sys
 
 class UnverifiedHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -793,7 +827,7 @@ class UnverifiedHandler(http.server.BaseHTTPRequestHandler):
         if self.path == '/generate_204':
             # Always redirects, never transitions to 204
             self.send_response(302)
-            self.send_header('Location', 'http://127.0.0.1:$unverifiedPort/login.html')
+            self.send_header('Location', 'http://127.0.0.1:{}/login.html'.format(self.server.server_port))
             self.end_headers()
         elif self.path == '/login.html':
             self.send_response(200)
@@ -814,11 +848,15 @@ class UnverifiedHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $unverifiedPort), UnverifiedHandler)
+s = http.server.HTTPServer(('127.0.0.1', 0), UnverifiedHandler)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockUnverified = Start-MockHttpServer -ScriptContent $unverifiedScript -FileName "mock_unverified.py" -Port $unverifiedPort
+$mockUnverified = Start-MockHttpServer -ScriptContent $unverifiedScript -FileName "mock_unverified.py"
+$unverifiedPort = $mockUnverified.Port
 
 $unverifiedCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "unverified_creds.json")
 New-TestCredentialsFile -FilePath $unverifiedCredsFile -Username "student" -Password "password"
@@ -846,16 +884,15 @@ try {
 # ------------------------------------------------------------------------------
 Write-Host "`n[Test 15] Form Action Pointing to Untrusted Domain" -ForegroundColor Cyan
 
-$phishingActionPort = 18099
 $phishingActionScript = @"
-import http.server
+import http.server, sys
 
 class PhishingActionHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == '/generate_204':
             self.send_response(302)
-            self.send_header('Location', 'http://127.0.0.1:$phishingActionPort/login.html')
+            self.send_header('Location', 'http://127.0.0.1:{}/login.html'.format(self.server.server_port))
             self.end_headers()
         elif self.path == '/login.html':
             self.send_response(200)
@@ -866,11 +903,15 @@ class PhishingActionHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $phishingActionPort), PhishingActionHandler)
+s = http.server.HTTPServer(('127.0.0.1', 0), PhishingActionHandler)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockPhishing = Start-MockHttpServer -ScriptContent $phishingActionScript -FileName "mock_phishing_action.py" -Port $phishingActionPort
+$mockPhishing = Start-MockHttpServer -ScriptContent $phishingActionScript -FileName "mock_phishing_action.py"
+$phishingActionPort = $mockPhishing.Port
 
 $phishingCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "phishing_creds.json")
 New-TestCredentialsFile -FilePath $phishingCredsFile -Username "student" -Password "password"
@@ -929,16 +970,15 @@ Assert-Condition ($extractedHidden.ContainsKey("user") -and $extractedHidden.Con
 # ------------------------------------------------------------------------------
 Write-Host "`n[Test 18] Meta-Refresh Redirect to Untrusted Domain Blocked" -ForegroundColor Cyan
 
-$metaPort = 18100
 $metaScript = @"
-import http.server
+import http.server, sys
 
 class MetaHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         if self.path == '/generate_204':
             self.send_response(302)
-            self.send_header('Location', 'http://127.0.0.1:$metaPort/landing.html')
+            self.send_header('Location', 'http://127.0.0.1:{}/landing.html'.format(self.server.server_port))
             self.end_headers()
         elif self.path == '/landing.html':
             self.send_response(200)
@@ -949,11 +989,15 @@ class MetaHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-s = http.server.HTTPServer(('127.0.0.1', $metaPort), MetaHandler)
+s = http.server.HTTPServer(('127.0.0.1', 0), MetaHandler)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(s.server_port))
+    f.flush()
 s.serve_forever()
 "@
 
-$mockMeta = Start-MockHttpServer -ScriptContent $metaScript -FileName "mock_meta.py" -Port $metaPort
+$mockMeta = Start-MockHttpServer -ScriptContent $metaScript -FileName "mock_meta.py"
+$metaPort = $mockMeta.Port
 
 $metaCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "meta_creds.json")
 New-TestCredentialsFile -FilePath $metaCredsFile -Username "student" -Password "password"
