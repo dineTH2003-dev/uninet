@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "feature/**" ]
   pull_request:
     branches: [ main ]
 
@@ -59,8 +59,11 @@ jobs:
 
           # Verify runtime execution in Windows PowerShell 5.1
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\bin\uninet.ps1" help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\tests\test_windows.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\scripts\windows\uninstall.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   test-windows-pwsh:
     name: PowerShell 7+ Core Validation
@@ -87,5 +90,8 @@ jobs:
 
           # Verify runtime execution in PowerShell 7+
           & pwsh -NoProfile -File ".\bin\uninet.ps1" help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & pwsh -NoProfile -File ".\tests\test_windows.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & pwsh -NoProfile -File ".\scripts\windows\uninstall.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
