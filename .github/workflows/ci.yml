@@ -66,16 +66,12 @@ jobs:
       - name: Run Windows Test Suite (PowerShell 5.1)
         shell: powershell
         run: |
-          $out = & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\tests\test_windows.ps1" 2>&1
-          $out | Out-String | Add-Content $env:GITHUB_STEP_SUMMARY
-          $out | ForEach-Object { Write-Host $_ }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\tests\test_windows.ps1"
 
       - name: Uninstaller Execution Check (PowerShell 5.1)
         shell: powershell
         run: |
-          & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\scripts\windows\uninstall.ps1"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\scripts\windows\uninstall.ps1"
 
   test-windows-pwsh:
     name: PowerShell 7+ Core Validation
@@ -103,19 +99,14 @@ jobs:
       - name: CLI Help Execution Check (PowerShell 7+)
         shell: pwsh
         run: |
-          & pwsh -NoProfile -File ".\bin\uninet.ps1" help
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File ".\bin\uninet.ps1" help
 
       - name: Run Windows Test Suite (PowerShell 7+)
         shell: pwsh
         run: |
-          $out = & pwsh -NoProfile -File ".\tests\test_windows.ps1" 2>&1
-          $out | Out-String | Add-Content $env:GITHUB_STEP_SUMMARY
-          $out | ForEach-Object { Write-Host $_ }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File ".\tests\test_windows.ps1"
 
       - name: Uninstaller Execution Check (PowerShell 7+)
         shell: pwsh
         run: |
-          & pwsh -NoProfile -File ".\scripts\windows\uninstall.ps1"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File ".\scripts\windows\uninstall.ps1"

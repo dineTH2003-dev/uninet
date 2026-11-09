@@ -67,6 +67,11 @@ function New-TestCredentialsFile([string]$FilePath, [string]$Username, [string]$
 # Initialize TLS callback
 Initialize-UniTlsCallback
 
+trap {
+    Write-Host "::error title=Uncaught Exception::$($_) at line $($_.InvocationInfo.ScriptLineNumber)"
+    Write-Host "UNCAUGHT EXCEPTION: $($_) at line $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Red
+}
+
 $TestPassCount = 0
 $TestFailCount = 0
 
@@ -78,6 +83,7 @@ function Assert-Condition([bool]$Condition, [string]$TestName, [string]$Details 
     } else {
         Write-Host "  [FAIL] $TestName" -ForegroundColor Red
         if ($Details) { Write-Host "         -> $Details" -ForegroundColor Yellow }
+        Write-Host "::error title=Assertion Failed::$TestName $(if ($Details) { "-> $Details" })"
         $script:TestFailCount++
     }
 }
