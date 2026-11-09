@@ -22,6 +22,11 @@ param (
 # ---------------------------------------------------------------------------
 $ErrorActionPreference = "Continue"
 
+# Ensure System.Security is loaded for DPAPI (ProtectedData) in Windows PowerShell 5.1
+try {
+    Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
+} catch { }
+
 $Version = "1.2.4"
 $RepoRawUrl     = "https://raw.githubusercontent.com/dineTH2003-dev/uninet/main"
 $ConfigDir      = "$env:APPDATA\uninet"

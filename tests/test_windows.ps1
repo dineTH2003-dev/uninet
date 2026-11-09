@@ -8,8 +8,17 @@
 param()
 
 $ErrorActionPreference = "Stop"
+
+# Ensure System.Security is loaded for DPAPI
+try {
+    Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
+} catch { }
+
+# Resolve Python executable for cross-platform mock servers
+$global:pyExe = if (Get-Command "python" -ErrorAction SilentlyContinue) { "python" } elseif (Get-Command "python3" -ErrorAction SilentlyContinue) { "python3" } elseif (Get-Command "py" -ErrorAction SilentlyContinue) { "py" } else { "python" }
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RepoRoot  = Resolve-Path (Join-Path $ScriptDir "..")
+$RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 $CoreScript = Join-Path $RepoRoot "bin\uninet.ps1"
 
 Write-Host "========================================================" -ForegroundColor Cyan
@@ -43,6 +52,17 @@ $global:ArubaProbeUrl = "http://connectivity-check.ubuntu.com./"
 $global:Quiet         = $true
 $global:CredsFile     = ""
 $global:SysCredsFile  = ""
+
+# Helper to write encrypted credentials JSON for test isolation
+function New-TestCredentialsFile([string]$FilePath, [string]$Username, [string]$Password) {
+    $encPass = Protect-Secret $Password
+    $obj = @{
+        username = $Username
+        password = $encPass
+    }
+    $json = $obj | ConvertTo-Json -Compress
+    Set-Content -Path $FilePath -Value $json -Encoding UTF8
+}
 
 # Initialize TLS callback
 Initialize-UniTlsCallback
@@ -204,7 +224,7 @@ s.serve_forever()
 $tempServerPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_portal.py")
 Set-Content -Path $tempServerPy -Value $serverScript -Encoding UTF8
 
-$proc = Start-Process -FilePath "python3" -ArgumentList "`"$tempServerPy`"" -PassThru
+$proc = Start-Process -FilePath $global:pyExe -ArgumentList "`"$tempServerPy`"" -PassThru
 Start-Sleep -Seconds 1
 
 try {
@@ -354,11 +374,11 @@ s.serve_forever()
 
 $ciscoPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_cisco.py")
 Set-Content -Path $ciscoPy -Value $ciscoServerScript -Encoding UTF8
-$procCisco = Start-Process -FilePath "python3" -ArgumentList "`"$ciscoPy`"" -PassThru
+$procCisco = Start-Process -FilePath $global:pyExe -ArgumentList "`"$ciscoPy`"" -PassThru
 Start-Sleep -Seconds 1
 
 $ciscoCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "cisco_creds.json")
-'{"username":"student_cisco","password":"CiscoPassword123!"}' | Set-Content -Path $ciscoCredsFile -Encoding UTF8
+New-TestCredentialsFile -FilePath $ciscoCredsFile -Username "student_cisco" -Password "CiscoPassword123!"
 
 try {
     $env:UNINET_TEST_SSID       = "UoM_Wireless"
@@ -449,11 +469,11 @@ s.serve_forever()
 
 $arubaPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_aruba.py")
 Set-Content -Path $arubaPy -Value $arubaServerScript -Encoding UTF8
-$procAruba = Start-Process -FilePath "python3" -ArgumentList "`"$arubaPy`"" -PassThru
+$procAruba = Start-Process -FilePath $global:pyExe -ArgumentList "`"$arubaPy`"" -PassThru
 Start-Sleep -Seconds 1
 
 $arubaCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "aruba_creds.json")
-'{"username":"student_aruba","password":"ArubaPassword456!"}' | Set-Content -Path $arubaCredsFile -Encoding UTF8
+New-TestCredentialsFile -FilePath $arubaCredsFile -Username "student_aruba" -Password "ArubaPassword456!"
 
 try {
     $env:UNINET_TEST_SSID             = "UoM.Wireless"
@@ -538,11 +558,11 @@ s.serve_forever()
 
 $roguePy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_rogue.py")
 Set-Content -Path $roguePy -Value $rogueServerScript -Encoding UTF8
-$procRogue = Start-Process -FilePath "python3" -ArgumentList "`"$roguePy`"" -PassThru
+$procRogue = Start-Process -FilePath $global:pyExe -ArgumentList "`"$roguePy`"" -PassThru
 Start-Sleep -Seconds 1
 
 $testCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "test_creds.json")
-'{"username":"student","password":"password"}' | Set-Content -Path $testCredsFile -Encoding UTF8
+New-TestCredentialsFile -FilePath $testCredsFile -Username "student" -Password "password"
 
 try {
     $env:UNINET_TEST_SSID       = "UoM_Wireless"
@@ -581,9 +601,8 @@ Assert-Condition ($tlsResult -eq $false) `
 Write-Host "`n[Test 10] Institutional Certificate Pinning & Hostname Binding" -ForegroundColor Cyan
 
 $pinCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-$rsa = [System.Security.Cryptography.RSA]::Create(2048)
-$req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new("CN=connect.uom.lk", $rsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-$validCert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow, [DateTimeOffset]::UtcNow.AddDays(1))
+$certBase64 = "MIICszCCAZugAwIBAgIJAIqRUiuw6tGyMA0GCSqGSIb3DQEBCwUAMBkxFzAVBgNVBAMTDmNvbm5lY3QudW9tLmxrMB4XDTI2MTEwOTE2NTA1OFoXDTM2MTEwOTE2NTA1OFowGTEXMBUGA1UEAxMOY29ubmVjdC51b20ubGswggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC1JUTHdPsf5BSnbcS+gKjoFbhZqhGHr9lXmupcPqvdBYuniOnfXicRvKVtBwZF/C0Czg2nhIemmGd9qHtBfzPM/QesnV0RmkyDlaeIIYzHu91YE6Q2cIGB69ZxgcwLysg0n5qtuvIaEXZ8p8bcdXpvOPjjJoxHIIv4q1RZuZ7U1yVTEpb/tPi5NLYbanDhr83tHlEqyrzchsqSLTnhkPs+z0uB26wQDmN1hmd0ZxvtQyih8BIFmoOIDgSFeBOEuxrjEUJ7rSgY6YJYsmvoIrqHDRZzjKztbOx820Ye86utGN6WX0ORujRxhrsdJrD2jDb2CS5BVPIm/FzWMS2kTENxAgMBAAEwDQYJKoZIhvcNAQELBQADggEBAAHwcYpz+N2o4SpD3N0maOtlsLm3DASoOCURRWMRUYr0gXxOhVgHZMiw9THRYp2D+HuubOg2COr7MqDLog9E8atvhNwaWBXrE1li3ASOM57jjIenQEoDJhw1y81qguTjqPsMhimxLLH7wNe/h2j8vpTXMKA6s+SpV54O/JPwu+LxnYXEIt2G0vOz7gIZooAkCc4rn+TmyV0WjRh1weP7Petrsge5rxepRPRm8YOTqsu43aACOZmOaXrZUa0XLLdYiMbQyTNbSPdSNrIl7tYYJJM5a+8sHNWGMe3GYxUvbTrg4pisbkCk7/sqC+lr9PnLo/Kf5wi9uQdgCHBXl7yo5WM="
+$validCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,[System.Convert]::FromBase64String($certBase64))
 $validThumb = $validCert.GetCertHashString()
 
 $env:UNINET_PINNED_CERT_THUMBPRINT = $validThumb
@@ -660,11 +679,11 @@ s.serve_forever()
 
 $onlinePy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_online.py")
 Set-Content -Path $onlinePy -Value $onlineScript -Encoding UTF8
-$procOnline = Start-Process -FilePath "python3" -ArgumentList "`"$onlinePy`"" -PassThru
+$procOnline = Start-Process -FilePath $global:pyExe -ArgumentList "`"$onlinePy`"" -PassThru
 Start-Sleep -Seconds 1
 
 $onlineCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "online_creds.json")
-'{"username":"student","password":"password"}' | Set-Content -Path $onlineCredsFile -Encoding UTF8
+New-TestCredentialsFile -FilePath $onlineCredsFile -Username "student" -Password "password"
 
 try {
     $env:UNINET_TEST_SSID       = "UoM_Wireless"
@@ -727,11 +746,11 @@ s.serve_forever()
 
 $rejectPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_reject.py")
 Set-Content -Path $rejectPy -Value $rejectScript -Encoding UTF8
-$procReject = Start-Process -FilePath "python3" -ArgumentList "`"$rejectPy`"" -PassThru
+$procReject = Start-Process -FilePath $global:pyExe -ArgumentList "`"$rejectPy`"" -PassThru
 Start-Sleep -Seconds 1
 
 $rejectCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "reject_creds.json")
-'{"username":"wrong_student","password":"bad_password"}' | Set-Content -Path $rejectCredsFile -Encoding UTF8
+New-TestCredentialsFile -FilePath $rejectCredsFile -Username "wrong_student" -Password "bad_password"
 
 try {
     $env:UNINET_TEST_SSID       = "UoM_Wireless"
@@ -796,11 +815,11 @@ s.serve_forever()
 
 $unverifiedPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_unverified.py")
 Set-Content -Path $unverifiedPy -Value $unverifiedScript -Encoding UTF8
-$procUnverified = Start-Process -FilePath "python3" -ArgumentList "`"$unverifiedPy`"" -PassThru
+$procUnverified = Start-Process -FilePath $global:pyExe -ArgumentList "`"$unverifiedPy`"" -PassThru
 Start-Sleep -Seconds 1
 
 $unverifiedCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "unverified_creds.json")
-'{"username":"student","password":"password"}' | Set-Content -Path $unverifiedCredsFile -Encoding UTF8
+New-TestCredentialsFile -FilePath $unverifiedCredsFile -Username "student" -Password "password"
 
 try {
     $env:UNINET_TEST_SSID       = "UoM_Wireless"
@@ -854,11 +873,11 @@ s.serve_forever()
 
 $phishingActionPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_phishing_action.py")
 Set-Content -Path $phishingActionPy -Value $phishingActionScript -Encoding UTF8
-$procPhishing = Start-Process -FilePath "python3" -ArgumentList "`"$phishingActionPy`"" -PassThru
+$procPhishing = Start-Process -FilePath $global:pyExe -ArgumentList "`"$phishingActionPy`"" -PassThru
 Start-Sleep -Seconds 1
 
 $phishingCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "phishing_creds.json")
-'{"username":"student","password":"password"}' | Set-Content -Path $phishingCredsFile -Encoding UTF8
+New-TestCredentialsFile -FilePath $phishingCredsFile -Username "student" -Password "password"
 
 try {
     $env:UNINET_TEST_SSID       = "UoM_Wireless"
@@ -943,11 +962,11 @@ s.serve_forever()
 
 $metaPy = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mock_meta.py")
 Set-Content -Path $metaPy -Value $metaScript -Encoding UTF8
-$procMeta = Start-Process -FilePath "python3" -ArgumentList "`"$metaPy`"" -PassThru
+$procMeta = Start-Process -FilePath $global:pyExe -ArgumentList "`"$metaPy`"" -PassThru
 Start-Sleep -Seconds 1
 
 $metaCredsFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "meta_creds.json")
-'{"username":"student","password":"password"}' | Set-Content -Path $metaCredsFile -Encoding UTF8
+New-TestCredentialsFile -FilePath $metaCredsFile -Username "student" -Password "password"
 
 try {
     $env:UNINET_TEST_SSID       = "UoM_Wireless"

@@ -43,3 +43,5 @@ if (Test-Path $UserDir) {
 }
 
 Write-Host "[+] UniNet has been completely removed from your Windows machine." -ForegroundColor Green
+$global:LASTEXITCODE = 0
+exit 0
