@@ -97,9 +97,59 @@ function Initialize-UniTlsCallback {
     } catch { }
 }
 Initialize-UniTlsCallback
-try {
-    [System.Net.WebRequest]::DefaultWebProxy = $null
-} catch { }
+
+# ===========================================================================
+# PROXY CONFIGURATION & WPAD POLICY
+# ===========================================================================
+# Explicitly defines proxy handling without mutating process-wide DefaultWebProxy.
+# - Loopback URIs: Always bypass proxy ($null) to eliminate WPAD auto-discovery latency.
+# - Captive portal probes & auth: Connect directly ($null) because Layer-3/4 captive
+#   portals intercept direct traffic; routing via proxies breaks portal interception.
+# - External internet requests: Honor UNINET_PROXY or system-configured WinINet proxy.
+function Get-UniProxyForUri {
+    param(
+        [System.Uri]$TargetUri,
+        [switch]$CaptivePortalProbe
+    )
+
+    if ($null -eq $TargetUri) { return $null }
+
+    # Rule 1: Loopback addresses (mock test servers, local IPC) ALWAYS bypass proxy
+    if ($TargetUri.IsLoopback -or $TargetUri.Host -in @("127.0.0.1", "localhost", "::1")) {
+        return $null
+    }
+
+    # Rule 2: Captive portal probes & authentication MUST connect directly to gateway
+    if ($CaptivePortalProbe) {
+        return $null
+    }
+
+    # Rule 3: Explicit UNINET_PROXY environment variable override
+    if ($env:UNINET_PROXY) {
+        $envProxy = $env:UNINET_PROXY.Trim()
+        if ($envProxy -in @("direct", "none", "off", "bypass")) {
+            return $null
+        }
+        try {
+            $parsed = [System.Uri]$envProxy
+            return New-Object System.Net.WebProxy($parsed)
+        } catch {
+            Write-UniLog "Warning: Malformed UNINET_PROXY '$envProxy'. Falling back to system proxy." "Yellow"
+        }
+    }
+
+    # Rule 4: System-configured proxy (WinINet / System Default) for general internet traffic
+    try {
+        $sysProxy = [System.Net.WebRequest]::GetSystemWebProxy()
+        if ($sysProxy -and -not $sysProxy.IsBypassed($TargetUri)) {
+            return $sysProxy
+        }
+    } catch { }
+
+    # Rule 5: Default fallback to direct connection
+    return $null
+}
+
 
 # ===========================================================================
 # UTILITY FUNCTIONS
@@ -182,7 +232,7 @@ function Test-IsOnline {
     try {
         $targetProbe = if ($env:UNINET_TEST_PROBE_URL) { $env:UNINET_TEST_PROBE_URL } else { $ProbeUrl }
         $req = [System.Net.HttpWebRequest]::Create($targetProbe)
-        $req.Proxy   = $null
+        $req.Proxy   = Get-UniProxyForUri -TargetUri $req.RequestUri -CaptivePortalProbe
         $req.Timeout = 4000
         $req.Method  = "GET"
         $req.AllowAutoRedirect = $false
@@ -203,7 +253,7 @@ function Test-ArubaOnline {
     try {
         $targetProbe = if ($env:UNINET_TEST_ARUBA_PROBE_URL) { $env:UNINET_TEST_ARUBA_PROBE_URL } else { $ArubaProbeUrl }
         $req = [System.Net.HttpWebRequest]::Create($targetProbe)
-        $req.Proxy   = $null
+        $req.Proxy   = Get-UniProxyForUri -TargetUri $req.RequestUri -CaptivePortalProbe
         $req.Timeout = 4000
         $req.Method  = "GET"
         $req.AllowAutoRedirect = $false
@@ -378,7 +428,7 @@ function Invoke-NoFollowProbe {
     $result = [PSCustomObject]@{ StatusCode = 0; Location = ""; SetCookies = @() }
     try {
         $req = [System.Net.HttpWebRequest]::Create([System.Uri]$Uri)
-        $req.Proxy              = $null
+        $req.Proxy              = Get-UniProxyForUri -TargetUri $req.RequestUri -CaptivePortalProbe
         $req.Method             = "GET"
         $req.AllowAutoRedirect  = $false
         $req.Timeout            = 8000
@@ -439,7 +489,7 @@ function Invoke-FollowProbe {
     $result = [PSCustomObject]@{ StatusCode = 0; EffectiveUrl = $Uri; Body = "" }
     try {
         $req = [System.Net.HttpWebRequest]::Create([System.Uri]$Uri)
-        $req.Proxy                       = $null
+        $req.Proxy                       = Get-UniProxyForUri -TargetUri $req.RequestUri -CaptivePortalProbe
         $req.Method                      = "GET"
         $req.AllowAutoRedirect           = $true
         $req.MaximumAutomaticRedirections = 8
@@ -511,7 +561,7 @@ function Invoke-PortalPost {
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($encoded)
 
         $req = [System.Net.HttpWebRequest]::Create([System.Uri]$ActionUrl)
-        $req.Proxy           = $null
+        $req.Proxy           = Get-UniProxyForUri -TargetUri $req.RequestUri -CaptivePortalProbe
         $req.Method          = "POST"
         $req.ContentType     = "application/x-www-form-urlencoded"
         $req.ContentLength   = $bodyBytes.Length
@@ -905,7 +955,9 @@ function Test-VersionNotification {
     try {
         $wc = New-Object System.Net.WebClient
         $wc.Headers.Add("User-Agent", "UniNet-Windows/$Version")
-        $latest = ($wc.DownloadString("$RepoRawUrl/VERSION")).Trim()
+        $versionUri = [System.Uri]"$RepoRawUrl/VERSION"
+        $wc.Proxy = Get-UniProxyForUri -TargetUri $versionUri
+        $latest = ($wc.DownloadString($versionUri)).Trim()
         if ($latest) {
             $isNewer = $false
             try {
@@ -1332,7 +1384,9 @@ function Invoke-UniUpdate {
     try {
         $wc = New-Object System.Net.WebClient
         $wc.Headers.Add("User-Agent", "UniNet-Windows/$Version")
-        $latest = ($wc.DownloadString("$RepoRawUrl/VERSION")).Trim()
+        $versionUri = [System.Uri]"$RepoRawUrl/VERSION"
+        $wc.Proxy = Get-UniProxyForUri -TargetUri $versionUri
+        $latest = ($wc.DownloadString($versionUri)).Trim()
     } catch {
         Write-Host "Error: Unable to check for updates. Please check your internet connection." -ForegroundColor Red
         return
@@ -1361,6 +1415,8 @@ function Invoke-UniUpdate {
         "$RepoRawUrl/bin/uninet.ps1"
     )) {
         try {
+            $dlUri = [System.Uri]$url
+            $wc.Proxy = Get-UniProxyForUri -TargetUri $dlUri
             $wc.DownloadFile($url, $tempFile)
             if ((Test-Path $tempFile) -and ((Get-Item $tempFile).Length -ge 500)) { $ok = $true; break }
         } catch { }

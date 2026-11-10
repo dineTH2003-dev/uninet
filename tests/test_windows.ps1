@@ -14,14 +14,13 @@ try {
     Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
 } catch { }
 
-# Disable default web proxy to eliminate WPAD auto-detection delays on Windows .NET Framework
-try {
-    [System.Net.WebRequest]::DefaultWebProxy = $null
-} catch { }
-
 # Resolve Python executable for cross-platform mock servers
 $cmd = Get-Command python, python3, py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 $global:pyExe = if ($cmd) { $cmd.Source } else { "python" }
+
+# Resolve PowerShell executable for child process execution
+$psCmd = Get-Command pwsh, powershell -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+$global:psExe = if ($psCmd) { $psCmd.Source } else { "powershell" }
 
 function Start-MockHttpServer([string]$ScriptContent, [string]$FileName) {
     $tempDir  = [System.IO.Path]::GetTempPath()
@@ -316,7 +315,7 @@ try {
 
     # Step 4: Verify post-login status (should return HTTP 204 now)
     $onlineCheck = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$port/generate_204")
-    $onlineCheck.Proxy = $null
+    $onlineCheck.Proxy = Get-UniProxyForUri -TargetUri $onlineCheck.RequestUri -CaptivePortalProbe
     $onlineCheck.AllowAutoRedirect = $false
     $onlineResp = $onlineCheck.GetResponse()
     Assert-Condition ([int]$onlineResp.StatusCode -eq 204) "Authentication succeeded; Internet probe returns HTTP 204"
@@ -454,7 +453,7 @@ try {
 
     # Verify post-login state on server
     $verifyProbe = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$ciscoPort/generate_204")
-    $verifyProbe.Proxy = $null
+    $verifyProbe.Proxy = Get-UniProxyForUri -TargetUri $verifyProbe.RequestUri -CaptivePortalProbe
     $verifyProbe.AllowAutoRedirect = $false
     $vResp = $verifyProbe.GetResponse()
     Assert-Condition ([int]$vResp.StatusCode -eq 204) `
@@ -547,7 +546,7 @@ try {
 
     # Verify post-login state on server
     $verifyProbe = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$arubaPort/ubuntu_probe")
-    $verifyProbe.Proxy = $null
+    $verifyProbe.Proxy = Get-UniProxyForUri -TargetUri $verifyProbe.RequestUri -CaptivePortalProbe
     $verifyProbe.AllowAutoRedirect = $false
     $vResp = $verifyProbe.GetResponse()
     Assert-Condition ([int]$vResp.StatusCode -eq 204) `
@@ -1026,6 +1025,116 @@ try {
     $env:UNINET_TEST_PROBE_URL = $null
     $env:UNINET_TEST_CREDS_FILE = $null
 }
+
+
+# ------------------------------------------------------------------------------
+# Test 19: Windows Proxy Policy & WPAD Isolation
+# ------------------------------------------------------------------------------
+Write-Host "`n[Test 19] Windows Proxy Policy & WPAD Isolation" -ForegroundColor Cyan
+
+# 1. Loopback HTTP request connects directly (proxy is null, bypassing WPAD)
+$p1 = Get-UniProxyForUri -TargetUri ([System.Uri]"http://127.0.0.1:8080/generate_204")
+Assert-Condition ($null -eq $p1) "Loopback HTTP request connects directly (proxy is null, bypassing WPAD)"
+
+# 2. Loopback localhost/::1 connects directly
+$p2 = Get-UniProxyForUri -TargetUri ([System.Uri]"http://localhost:8080/generate_204")
+Assert-Condition ($null -eq $p2) "Loopback localhost request connects directly (proxy is null)"
+
+# 3. Captive portal probe request with -CaptivePortalProbe connects directly
+$p3 = Get-UniProxyForUri -TargetUri ([System.Uri]"http://connectivitycheck.gstatic.com/generate_204") -CaptivePortalProbe
+Assert-Condition ($null -eq $p3) "Captive portal probe connects directly to enable gateway redirect interception"
+
+# 4. HTTPS captive portal auth endpoint with -CaptivePortalProbe connects directly
+$p4 = Get-UniProxyForUri -TargetUri ([System.Uri]"https://connect.uom.lk/cgi-bin/login") -CaptivePortalProbe
+Assert-Condition ($null -eq $p4) "Captive portal HTTPS authentication connects directly to local gateway"
+
+# 5. Configured UNINET_PROXY is honored for general internet traffic
+$env:UNINET_PROXY = "http://127.0.0.1:8888"
+try {
+    $p5 = Get-UniProxyForUri -TargetUri ([System.Uri]"https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/VERSION")
+    Assert-Condition ($null -ne $p5 -and $p5.Address.AbsoluteUri -eq "http://127.0.0.1:8888/") `
+        "General internet request honors configured UNINET_PROXY"
+} finally {
+    $env:UNINET_PROXY = $null
+}
+
+# 6. UNINET_PROXY='direct' explicitly forces direct connection
+$env:UNINET_PROXY = "direct"
+try {
+    $p6 = Get-UniProxyForUri -TargetUri ([System.Uri]"https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/VERSION")
+    Assert-Condition ($null -eq $p6) "UNINET_PROXY='direct' explicitly forces direct connection"
+} finally {
+    $env:UNINET_PROXY = $null
+}
+
+# 7. Malformed UNINET_PROXY falls back gracefully without unhandled exceptions
+$env:UNINET_PROXY = "http://[invalid-uri:--\\"
+try {
+    $p7 = Get-UniProxyForUri -TargetUri ([System.Uri]"https://raw.githubusercontent.com/dineTH2003-dev/uninet/main/VERSION")
+    Assert-Condition ($true) "Malformed UNINET_PROXY falls back gracefully without throwing unhandled exceptions"
+} finally {
+    $env:UNINET_PROXY = $null
+}
+
+# 8. General request resolves proxy policy safely without throwing
+$p8 = Get-UniProxyForUri -TargetUri ([System.Uri]"https://www.google.com")
+Assert-Condition ($true) "General request resolves proxy policy safely without throwing"
+
+
+# ------------------------------------------------------------------------------
+# Test 20: Uninstaller Exit Code Correctness & Idempotency
+# ------------------------------------------------------------------------------
+Write-Host "`n[Test 20] Uninstaller Exit Code Correctness & Idempotency" -ForegroundColor Cyan
+
+$uninstallScript = Join-Path $RepoRoot "scripts\windows\uninstall.ps1"
+
+# Scenario 1: Clean uninstall when directory & credentials exist
+$testInstallDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "uninet_test_install_" + [System.Guid]::NewGuid().ToString("N"))
+$testUserDir    = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "uninet_test_user_" + [System.Guid]::NewGuid().ToString("N"))
+$null = New-Item -ItemType Directory -Path $testInstallDir -Force
+$null = New-Item -ItemType Directory -Path $testUserDir -Force
+$testCredFile = Join-Path $testUserDir "credentials.json"
+Set-Content -Path $testCredFile -Value '{"username":"test","password":"enc"}'
+
+& $global:psExe -NoProfile -ExecutionPolicy Bypass -File $uninstallScript -InstallDir $testInstallDir -UserDir $testUserDir -TaskName "NonExistentTask123" -SkipWlanProfiles
+$exit1 = $LASTEXITCODE
+Assert-Condition ($exit1 -eq 0) "Uninstaller returns exit code 0 on clean uninstallation" "ExitCode=$exit1"
+Assert-Condition (-not (Test-Path $testInstallDir)) "Uninstaller completely purged installation directory"
+Assert-Condition (-not (Test-Path $testUserDir)) "Uninstaller completely purged user configuration and credentials directory"
+
+# Scenario 2: Idempotent uninstallation when resources are already absent
+& $global:psExe -NoProfile -ExecutionPolicy Bypass -File $uninstallScript -InstallDir $testInstallDir -UserDir $testUserDir -TaskName "NonExistentTask123" -SkipWlanProfiles
+$exit2 = $LASTEXITCODE
+Assert-Condition ($exit2 -eq 0) "Uninstaller returns exit code 0 when resources are already absent (idempotent)" "ExitCode=$exit2"
+
+# Scenario 3: Repeated uninstallation completes safely
+& $global:psExe -NoProfile -ExecutionPolicy Bypass -File $uninstallScript -InstallDir $testInstallDir -UserDir $testUserDir -TaskName "NonExistentTask123" -SkipWlanProfiles
+$exit3 = $LASTEXITCODE
+Assert-Condition ($exit3 -eq 0) "Repeated uninstallation completes safely with exit code 0" "ExitCode=$exit3"
+
+# Scenario 4: Genuine cleanup failure detection (Directory cannot be removed due to permissions)
+$failDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "uninet_fail_install_" + [System.Guid]::NewGuid().ToString("N"))
+$null = New-Item -ItemType Directory -Path $failDir -Force
+$lockedFile = Join-Path $failDir "sub.txt"
+Set-Content -Path $lockedFile -Value "sub"
+
+$fileStream = $null
+if ([Environment]::OSVersion.Platform -eq "Unix") {
+    $null = & chmod 555 $failDir
+} else {
+    $fileStream = [System.IO.File]::Open($lockedFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+}
+
+try {
+    & $global:psExe -NoProfile -ExecutionPolicy Bypass -File $uninstallScript -InstallDir $failDir -UserDir $testUserDir -TaskName "NonExistentTask123" -SkipWlanProfiles
+    $failExit = $LASTEXITCODE
+    Assert-Condition ($failExit -ne 0) "Uninstaller returns non-zero exit code when directory deletion fails" "ExitCode=$failExit"
+} finally {
+    if ($fileStream) { $fileStream.Close(); $fileStream.Dispose() }
+    if ([Environment]::OSVersion.Platform -eq "Unix") { $null = & chmod 777 $failDir }
+    Remove-Item -Path $failDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 
 
 # ------------------------------------------------------------------------------
