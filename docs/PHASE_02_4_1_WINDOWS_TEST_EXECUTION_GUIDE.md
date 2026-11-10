@@ -190,11 +190,29 @@ try {
     $wlanEvents = Get-WinEvent -LogName "Microsoft-Windows-WLAN-AutoConfig/Operational" -MaxEvents 5 -ErrorAction Stop
     $wlanEvents | Select-Object TimeCreated, Id, Message | Format-List | Out-String | Out-File $outFile -Append
 } catch {
-    "WLAN-AutoConfig operational event log could not be queried or has no events." | Out-File $outFile -Append
+    if ($_.Exception.Message -match "No events were found") {
+        "Channel is active, but 0 events were found in Microsoft-Windows-WLAN-AutoConfig/Operational." | Out-File $outFile -Append
+    } else {
+        "UNAVAILABLE: Microsoft-Windows-WLAN-AutoConfig/Operational could not be accessed ($($_.Exception.Message.Trim()))." | Out-File $outFile -Append
+    }
 }
 
-# 8. UniNet Engine Version & Sanitized Logs
-"`n[8. UniNet Engine Version & Sanitized Execution Logs]" | Out-File $outFile -Append
+# 8. Task Scheduler Operational Events (Last 5)
+"`n[8. Recent Task Scheduler Operational Events (100 / 102 / 200 / 201)]" | Out-File $outFile -Append
+try {
+    $taskEvents = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'; ID=100,102,200,201} -MaxEvents 5 -ErrorAction Stop
+    $taskEvents | Select-Object TimeCreated, Id, Message | Format-List | Out-String | Out-File $outFile -Append
+} catch {
+    if ($_.Exception.Message -match "No events were found") {
+        "Channel is active, but 0 matching task events were found." | Out-File $outFile -Append
+    } else {
+        "UNAVAILABLE: Microsoft-Windows-TaskScheduler/Operational channel is disabled or inaccessible ($($_.Exception.Message.Trim()))." | Out-File $outFile -Append
+        "Note: In Windows 11, TaskScheduler/Operational is disabled by default. Enable via: wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true" | Out-File $outFile -Append
+    }
+}
+
+# 9. UniNet Engine Version & Sanitized Logs
+"`n[9. UniNet Engine Version & Sanitized Execution Logs]" | Out-File $outFile -Append
 if (Test-Path "C:\ProgramData\uninet\uninet.cmd") {
     $statusOut = cmd.exe /c "uninet status" 2>&1
     $statusOut | Out-File $outFile -Append
