@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "feature/**" ]
   pull_request:
     branches: [ main ]
 
@@ -34,20 +34,25 @@ jobs:
           bash -n install.sh
           bash -n uninstall.sh
 
-  test-windows:
-    name: PowerShell Syntax Check (Windows)
+  test-windows-ps5:
+    name: Windows PowerShell 5.1 Validation
     runs-on: windows-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Validate PowerShell Scripts
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: AST Syntax Check (PowerShell 5.1)
         shell: powershell
         run: |
-          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1")
+          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1", "tests\test_windows.ps1")
           foreach ($s in $scripts) {
-              $tokens = $null
-              $errors = $null
+              [System.Management.Automation.Language.Token[]]$tokens = @()
+              [System.Management.Automation.Language.ParseError[]]$errors = @()
               $fullPath = (Resolve-Path $s).Path
               $ast = [System.Management.Automation.Language.Parser]::ParseFile($fullPath, [ref]$tokens, [ref]$errors)
               if ($errors.Count -gt 0) {
@@ -57,6 +62,66 @@ jobs:
               Write-Host "[+] $s passed AST syntax validation"
           }
 
-          # Verify runtime execution in Windows PowerShell 5.1
+      - name: CLI Help Execution Check (PowerShell 5.1)
+        shell: powershell
+        run: |
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\bin\uninet.ps1" help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run Windows Test Suite (PowerShell 5.1)
+        shell: powershell
+        run: |
+          & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\tests\test_windows.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Uninstaller Execution Check (PowerShell 5.1)
+        shell: powershell
+        run: |
           & powershell.exe -ExecutionPolicy Bypass -NoProfile -File ".\scripts\windows\uninstall.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  test-windows-pwsh:
+    name: PowerShell 7+ Core Validation
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: AST Syntax Check (PowerShell 7+)
+        shell: pwsh
+        run: |
+          $scripts = @("bin\uninet.ps1", "scripts\windows\install.ps1", "scripts\windows\uninstall.ps1", "tests\test_windows.ps1")
+          foreach ($s in $scripts) {
+              [System.Management.Automation.Language.Token[]]$tokens = @()
+              [System.Management.Automation.Language.ParseError[]]$errors = @()
+              $fullPath = (Resolve-Path $s).Path
+              $ast = [System.Management.Automation.Language.Parser]::ParseFile($fullPath, [ref]$tokens, [ref]$errors)
+              if ($errors.Count -gt 0) {
+                  Write-Error "Syntax error in $s : $errors"
+                  exit 1
+              }
+              Write-Host "[+] $s passed AST syntax validation"
+          }
+
+      - name: CLI Help Execution Check (PowerShell 7+)
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File ".\bin\uninet.ps1" help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run Windows Test Suite (PowerShell 7+)
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File ".\tests\test_windows.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Uninstaller Execution Check (PowerShell 7+)
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File ".\scripts\windows\uninstall.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

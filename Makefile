@@ -17,9 +17,20 @@ lint:
 	@bash -n tests/test_simulation.sh
 	@echo "✔ All shell scripts passed syntax checks!"
 
-test: lint
-	@echo "Running test suite..."
+test: lint test-windows
+	@echo "Running Linux simulation test suite..."
 	@bash tests/test_simulation.sh
+
+test-windows:
+	@if command -v pwsh >/dev/null 2>&1; then \
+		echo "Running Windows PowerShell test suite..."; \
+		pwsh -NoProfile -File tests/test_windows.ps1; \
+	elif [ -x "$$HOME/.dotnet/tools/pwsh" ]; then \
+		echo "Running Windows PowerShell test suite via dotnet tool..."; \
+		$$HOME/.dotnet/tools/pwsh -NoProfile -File tests/test_windows.ps1; \
+	else \
+		echo "Notice: pwsh not found on system PATH. Skipping local PowerShell test."; \
+	fi
 
 install:
 	@./install.sh
