@@ -140,7 +140,11 @@ Get-Acl "C:\ProgramData\uninet" | Format-List AccessToString
 
 ### Step 2.3: Scheduled Task Inspection
 Verify that the scheduled task was created strictly in the user's interactive security context:
-```cmd
+```powershell
+# In PowerShell:
+schtasks /query /tn "UniNetAutoConnect_$env:USERNAME" /fo LIST /v
+
+# In Command Prompt (cmd.exe):
 schtasks /query /tn "UniNetAutoConnect_%USERNAME%" /fo LIST /v
 ```
 **Task Verification Checklist:**
@@ -157,6 +161,9 @@ schtasks /query /tn "UniNetAutoConnect_%USERNAME%" /fo LIST /v
 *Objective: Authenticate through each campus Wi-Fi controller architecture and verify connectivity.*
 
 For each campus SSID, conduct testing independently using real student credentials (`uninet setup`):
+
+> [!TIP]
+> **Wi-Fi Profile Prerequisite**: If the laptop has never associated with a target SSID, `netsh wlan connect name="<SSID>"` requires an existing profile. Associate either via the Windows 11 Taskbar Wi-Fi flyout (Win+A), or run `uninet` once to register the university WLAN profiles automatically.
 
 ### 4.1 Test Run: `UoM_Wireless` (Cisco / NEC WebAuth Architecture)
 1. Associate laptop with `UoM_Wireless`:
@@ -187,8 +194,9 @@ For each campus SSID, conduct testing independently using real student credentia
    ```
 4. Verify Internet Connectivity:
    ```cmd
-   curl -I https://www.google.com
+   curl.exe -I https://www.google.com
    ```
+   *(Note: In Windows PowerShell 5.1, 'curl' is an alias for Invoke-WebRequest which does not accept `-I`. Use `curl.exe -I` or `(Invoke-WebRequest -Uri "https://www.google.com" -UseBasicParsing).StatusCode`.)*
 
 ### 4.2 Test Run: `UoM.Wireless` (Aruba Networks Architecture)
 1. Disconnect and associate with `UoM.Wireless`:
@@ -365,7 +373,7 @@ Get-Content "$env:APPDATA\uninet\uninet.log" -Tail 50
 | :--- | :--- | :--- | :---: |
 | **No Plaintext Passwords** | Search `%APPDATA%\uninet` and `%TEMP%` for entered password string | Zero occurrences in plaintext files | `PASS` |
 | **Tamper Resistance** | As a standard user, attempt to overwrite `C:\ProgramData\uninet\uninet_core.ps1` | `Access is denied` (System error 5) | `PASS` |
-| **Least Privilege Task** | `schtasks /query /tn UniNetAutoConnect_%USERNAME% /v` | Run As = Current User (NOT SYSTEM) | `PASS` |
+| **Least Privilege Task** | `schtasks /query /tn "UniNetAutoConnect_$env:USERNAME" /v` | Run As = Current User (NOT SYSTEM) | `PASS` |
 | **Invisible Execution** | Reconnect Wi-Fi while using an active application | 0 black terminal windows flash | `PASS` |
 | **Untrusted Redirect Rejection** | Test redirect to non-`connect.uom.lk` domain | Status = `UNTRUSTED_REDIRECT` | `PASS` |
 | **DPAPI Encryption Scope** | Attempt to decrypt `credentials.json` from a different Windows user profile | Cryptographic rejection (`Access denied` / `$null`) | `PASS` |

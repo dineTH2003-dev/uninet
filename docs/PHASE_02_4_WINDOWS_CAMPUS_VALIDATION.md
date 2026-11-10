@@ -333,6 +333,10 @@ A comprehensive security audit of UniNet's Windows implementation was conducted 
      - Rationale: The open HTTP portal is an institutional infrastructure constraint imposed by the university network architecture, not an application flaw in UniNet. Students using standard web browsers (Chrome, Edge, Firefox) are subjected to the exact same cleartext HTTP POST when logging in manually.
 4. **Engineering Recommendation & Multi-Layered Remediation Strategy:**
    - **Recommendation:** UniNet must **retain** HTTP support for `connect.uom.lk:80` on `UoM_Wireless` to maintain operational compatibility, while implementing the following four-tier security defenses:
+     > [!WARNING]
+     > **Cryptographic Boundary Clarification**:
+     > Destination hostname validation and SSID prioritization are application routing and authorization policies. **They do NOT encrypt HTTP traffic.** When authenticating to `UoM_Wireless` over port 80 HTTP, credentials travel in cleartext over an unencrypted Layer-2 802.11 link and are subject to passive radio interception.
+
      1. **Strict Host Whitelist:** UniNet restricts port 80 POST requests strictly to `connect.uom.lk`. It will never send credentials over HTTP to any other hostname or IP address.
      2. **Automated Optimizer Preference (HTTPS First):** The UniNet network optimizer (`uninet optimize`) scores HTTPS-enabled SSIDs (`UoM.Wireless` on Aruba and `UoM-Wireless` on Ruijie) higher than `UoM_Wireless`, steering clients away from unencrypted networks whenever a secure alternative is in range.
      3. **Console Security Warning:** When authenticating via `UoM_Wireless`, UniNet displays an explicit cyan security notice:
