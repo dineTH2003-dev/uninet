@@ -35,9 +35,25 @@ This manual prescribes the exact, end-to-end verification procedure for validati
 
 *Objective: Verify administrative installation, NTFS access control lists (ACLs), script generation, and uninstallation safety.*
 
-### Step 1.1: Administrative Installation
-1. Open PowerShell as an **Administrator** (`Run as Administrator`).
+### Step 1.1: Standard User vs. Administrative Installation Verification
+
+#### Step 1.1a: Attempt Installation as Standard (Non-Elevated) User
+1. Open a standard, non-elevated PowerShell console (do NOT run as Administrator).
 2. Navigate to the UniNet repository clone:
+   ```powershell
+   Set-Location "C:\path\to\uninet"
+   ```
+3. Attempt to run the installer:
+   ```powershell
+   & ".\scripts\windows\install.ps1"
+   ```
+4. **Expected Result & Security Acceptance Criteria:**
+   - The installer encounters permission restrictions when attempting to write to `C:\ProgramData\uninet`, invoke `Set-Acl`, modify Machine-level `PATH`, or run `wevtutil` to enable event channels.
+   - System integrity is preserved; standard users cannot compromise system-wide binaries or machine environment variables.
+
+#### Step 1.1b: Administrative Installation
+1. Open PowerShell as an **Administrator** (`Run as Administrator`).
+2. Navigate to the repository:
    ```powershell
    Set-Location "C:\path\to\uninet"
    ```
@@ -51,6 +67,7 @@ This manual prescribes the exact, end-to-end verification procedure for validati
    - Core engine: `C:\ProgramData\uninet\uninet_core.ps1`
    - Silent runner: `C:\ProgramData\uninet\uninet_silent.vbs`
    - Machine `PATH` environment variable registration.
+   - WLAN-AutoConfig Operational channel activation via `wevtutil`.
 
 ### Step 1.2: NTFS ACL & Privilege Escalation (LPE) Verification
 Verify that standard, non-administrator users have `ReadAndExecute` permissions only, preventing malicious tampering with executable scripts:
@@ -62,18 +79,30 @@ Get-Acl "C:\ProgramData\uninet" | Format-List AccessToString
 - [ ] `NT AUTHORITY\SYSTEM`: FullControl (`ContainerInherit, ObjectInherit`)
 - [ ] `BUILTIN\Users`: ReadAndExecute (`ContainerInherit, ObjectInherit`) — **NO Write or Modify permissions**.
 
-### Step 1.3: Uninstaller Smoke Test
-1. Execute the uninstaller from an administrative terminal:
-   ```powershell
-   & ".\scripts\windows\uninstall.ps1"
-   ```
-2. Verify:
-   - Output indicates clean removal.
-   - Process exit code is `0` (`$LASTEXITCODE -eq 0`).
-   - `Test-Path "C:\ProgramData\uninet"` returns `False`.
-3. Re-run `uninstall.ps1` immediately (idempotency verification):
+### Step 1.3: Uninstallation and Reinstallation Verification
+1. **Standard User Denial Check:**
+   - From a non-elevated prompt, attempt to delete `C:\ProgramData\uninet` or execute `uninstall.ps1`.
+   - Confirm operation fails with `Access is denied`.
+2. **Administrative Uninstallation:**
+   - Execute the uninstaller from an administrative terminal:
+     ```powershell
+     & ".\scripts\windows\uninstall.ps1"
+     ```
+   - Verify output indicates clean removal of binaries, scheduled tasks, and machine `PATH` entry.
+   - Confirm process exit code is `0` (`$LASTEXITCODE -eq 0`).
+   - Confirm `Test-Path "C:\ProgramData\uninet"` returns `False`.
+3. **Uninstaller Idempotency Check:**
+   - Re-run `uninstall.ps1` immediately when already uninstalled:
+     ```powershell
+     & ".\scripts\windows\uninstall.ps1"
+     ```
    - Confirm exit code is `0` and no uncaught exceptions are thrown.
-4. Re-run `install.ps1` to restore the application for subsequent phases.
+4. **Reinstallation Verification:**
+   - Re-run `install.ps1` from the administrative console:
+     ```powershell
+     & ".\scripts\windows\install.ps1"
+     ```
+   - Verify `C:\ProgramData\uninet` and system binaries are cleanly redeployed for subsequent test phases.
 
 ---
 
@@ -265,9 +294,70 @@ For each campus SSID, conduct testing independently using real student credentia
    - Password is NOT leaked to event logs or console.
 4. Re-enter valid credentials and confirm authentication recovers immediately.
 
+### Drill 4.6: System Reboot & Cold Boot Auto-Connect Verification
+1. Perform a full system restart:
+   ```cmd
+   shutdown /r /t 0
+   ```
+2. Log in to Windows desktop as the standard student user.
+3. Observe network initialization:
+   - Wi-Fi adapter connects to campus SSID (e.g. `UoM.Wireless`).
+   - WLAN-AutoConfig fires Event `8001`.
+   - `UniNetAutoConnect_%USERNAME%` triggers silently via Task Scheduler.
+4. **Verify:**
+   - Full internet connectivity is established within 5–8 seconds of Windows desktop load.
+   - Zero terminal popups or UAC prompts appear on screen.
+   - Run `uninet status` to confirm `State Machine Status: ONLINE`.
+
 ---
 
-## 6. Test Phase 5: Security & Privacy Certification
+## 6. Test Phase 5: Diagnostic Log & Event Viewer Inspection
+
+*Objective: Verify structured diagnostics, log integrity, event tracing, and zero credential leakage.*
+
+### Step 5.1: CLI Diagnostics Inspection
+Execute the following diagnostic commands from standard PowerShell / CMD:
+1. **Network & Portal Status:**
+   ```cmd
+   uninet status
+   ```
+   *Verify:* Correct SSID, active BSSID, RSSI %, gateway IP, probe target, and current connection state (`ONLINE` or `PORTAL_DETECTED`).
+2. **Recent Execution Logs:**
+   ```cmd
+   uninet logs
+   ```
+   *Verify:* Chronological execution trace, timestamps, sanitized endpoints, absence of passwords, and exit status.
+3. **Multi-Factor Network Optimization Analysis:**
+   ```cmd
+   uninet optimize
+   ```
+   *Verify:* Scans campus SSIDs, lists signal percentages, frequencies, and channel scores without error.
+
+### Step 5.2: File System Log File Audit
+Inspect the user-scoped log file directly:
+```powershell
+Get-Content "$env:APPDATA\uninet\uninet.log" -Tail 50
+```
+**Log Audit Checklist:**
+- [ ] Log entries follow structured format: `[YYYY-MM-DD HH:MM:SS] [LEVEL] Message`.
+- [ ] No plaintext passwords, hashes, session cookies (`PORTAL_SESS`), or student credentials appear in any line.
+- [ ] Error messages record structured failure codes (`TLS_VALIDATION_FAILED`, `AUTHENTICATION_REJECTED`, etc.) rather than unhandled exception stack traces.
+
+### Step 5.3: Windows Event Viewer Audit
+1. **WLAN-AutoConfig Event Channel:**
+   ```powershell
+   wevtutil qe Microsoft-Windows-WLAN-AutoConfig/Operational /c:5 /rd:true /f:text
+   ```
+   - Confirm Event ID `8001` (*"WLAN AutoConfig service has successfully connected to a wireless network"*) is logged with the target campus SSID.
+2. **Task Scheduler Event Channel:**
+   ```powershell
+   wevtutil qe Microsoft-Windows-TaskScheduler/Operational /q:"*[System[Provider[@Name='Microsoft-Windows-TaskScheduler'] and (EventID=100 or EventID=102 or EventID=200 or EventID=201)]]" /c:5 /rd:true /f:text
+   ```
+   - Confirm Event `100` (Task triggered by event), Event `200` (Action started), and Event `102` (Task completed with exit code 0).
+
+---
+
+## 7. Test Phase 6: Security & Privacy Certification
 
 *Objective: Confirm non-negotiable security postures in a live operating system environment.*
 
@@ -282,7 +372,7 @@ For each campus SSID, conduct testing independently using real student credentia
 
 ---
 
-## 7. Post-Test Cleanup & Production Sign-Off
+## 8. Post-Test Cleanup & Production Sign-Off
 
 Upon completing all campus testing drills:
 1. Purge all test logs:
