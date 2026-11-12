@@ -37,7 +37,20 @@ if (-not (Test-Path $InstallDir)) {
 # Security Hardening: Ensure strict permissions on installation directory.
 # Unprivileged users get ReadAndExecute only — prevent Local Privilege Escalation (LPE).
 try {
-    $acl = Get-Acl $InstallDir
+    $dirInfo = New-Object System.IO.DirectoryInfo($InstallDir)
+    # Scoped strictly to Access (DACL) to avoid triggering SeSecurityPrivilege
+    $acl = $null
+    if ($dirInfo.PSObject.Methods['GetAccessControl']) {
+        $acl = $dirInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+    } else {
+        $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
+        if ($aclExt) {
+            $acl = $aclExt::GetAccessControl($dirInfo, [System.Security.AccessControl.AccessControlSections]::Access)
+        } else {
+            $acl = Get-Acl -Path $InstallDir
+        }
+    }
+    $acl.SetAccessRuleProtection($true, $false)
     $usersSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545") # BUILTIN\Users
     $existingRules = @($acl.Access | Where-Object { $_.IdentityReference -eq $usersSid -or $_.IdentityReference.Value -like "*Users*" })
     foreach ($r in $existingRules) {
@@ -49,7 +62,16 @@ try {
     $acl.AddAccessRule($readRule)
     $acl.AddAccessRule($adminRule)
     $acl.AddAccessRule($systemRule)
-    Set-Acl -Path $InstallDir -AclObject $acl
+    if ($dirInfo.PSObject.Methods['SetAccessControl']) {
+        $dirInfo.SetAccessControl($acl)
+    } else {
+        $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
+        if ($aclExt) {
+            $aclExt::SetAccessControl($dirInfo, $acl)
+        } else {
+            Set-Acl -Path $InstallDir -AclObject $acl -ErrorAction SilentlyContinue
+        }
+    }
 } catch { }
 
 # Enable WLAN-AutoConfig Operational channel so Event 8001 fires reliably on Wi-Fi association

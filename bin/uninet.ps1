@@ -1000,6 +1000,161 @@ function Show-UniStatus {
 }
 
 # ===========================================================================
+# FILESYSTEM SECURITY & ACL HARDENING (DACL-ONLY, NO SACL / SeSecurityPrivilege)
+# ===========================================================================
+function Set-UniSecureAcl {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [switch]$IsDirectory
+    )
+
+    if (-not (Test-Path $Path)) { return $false }
+
+    if ([Environment]::OSVersion.Platform -ne "Win32NT") {
+        # POSIX systems: strictly enforce 0700 for directories and 0600 for credential files
+        try {
+            if ($IsDirectory) { & chmod 700 $Path 2>$null }
+            else { & chmod 600 $Path 2>$null }
+            return $true
+        } catch {
+            return $false
+        }
+    }
+
+    try {
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        if ([string]::IsNullOrWhiteSpace($currentUser)) {
+            $currentUser = "$env:USERDOMAIN\$env:USERNAME"
+        }
+
+        if ($IsDirectory) {
+            $dirInfo = New-Object System.IO.DirectoryInfo($Path)
+            # Retrieve ONLY the Access (DACL) section — NEVER SACL/Audit rules!
+            # Querying Access avoids demanding SeSecurityPrivilege (manage auditing user right).
+            $acl = $null
+            if ($dirInfo.PSObject.Methods['GetAccessControl']) {
+                $acl = $dirInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            } else {
+                $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
+                if ($aclExt) {
+                    $acl = $aclExt::GetAccessControl($dirInfo, [System.Security.AccessControl.AccessControlSections]::Access)
+                } else {
+                    $acl = Get-Acl -Path $Path
+                }
+            }
+            # Protect DACL from inheritance ($isProtected = $true, $preserveInheritance = $false)
+            $acl.SetAccessRuleProtection($true, $false)
+
+            # Strip any lingering unprivileged ACEs (BUILTIN\Users, Everyone)
+            $usersSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545") # BUILTIN\Users
+            $worldSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0")     # Everyone
+            $rulesToRemove = @($acl.Access | Where-Object {
+                $_.IdentityReference -eq $usersSid -or
+                $_.IdentityReference -eq $worldSid -or
+                $_.IdentityReference.Value -like "*Users*" -or
+                $_.IdentityReference.Value -like "*Everyone*"
+            })
+            foreach ($r in $rulesToRemove) {
+                try { $acl.RemoveAccessRule($r) | Out-Null } catch { }
+            }
+
+            # Grant explicit FullControl to CurrentUser, BUILTIN\Administrators, and SYSTEM
+            $userRule   = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $acl.AddAccessRule($userRule)
+            $acl.AddAccessRule($adminRule)
+            $acl.AddAccessRule($systemRule)
+
+            # Apply DACL via direct .NET object methods (PS 5.1 native or PS 7 FileSystemAclExtensions)
+            # This directly bypasses Set-Acl cmdlet SACL bugs and SeSecurityPrivilege failures.
+            if ($dirInfo.PSObject.Methods['SetAccessControl']) {
+                $dirInfo.SetAccessControl($acl)
+            } else {
+                $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
+                if ($aclExt) {
+                    $aclExt::SetAccessControl($dirInfo, $acl)
+                } else {
+                    Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop
+                }
+            }
+        } else {
+            $fileInfo = New-Object System.IO.FileInfo($Path)
+            # Retrieve ONLY the Access (DACL) section
+            $acl = $null
+            if ($fileInfo.PSObject.Methods['GetAccessControl']) {
+                $acl = $fileInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            } else {
+                $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
+                if ($aclExt) {
+                    $acl = $aclExt::GetAccessControl($fileInfo, [System.Security.AccessControl.AccessControlSections]::Access)
+                } else {
+                    $acl = Get-Acl -Path $Path
+                }
+            }
+            $acl.SetAccessRuleProtection($true, $false)
+
+            $usersSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545")
+            $worldSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-1-0")
+            $rulesToRemove = @($acl.Access | Where-Object {
+                $_.IdentityReference -eq $usersSid -or
+                $_.IdentityReference -eq $worldSid -or
+                $_.IdentityReference.Value -like "*Users*" -or
+                $_.IdentityReference.Value -like "*Everyone*"
+            })
+            foreach ($r in $rulesToRemove) {
+                try { $acl.RemoveAccessRule($r) | Out-Null } catch { }
+            }
+
+            $userRule   = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, "FullControl", "None", "None", "Allow")
+            $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "None", "None", "Allow")
+            $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "None", "None", "Allow")
+            $acl.AddAccessRule($userRule)
+            $acl.AddAccessRule($adminRule)
+            $acl.AddAccessRule($systemRule)
+
+            if ($fileInfo.PSObject.Methods['SetAccessControl']) {
+                $fileInfo.SetAccessControl($acl)
+            } else {
+                $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
+                if ($aclExt) {
+                    $aclExt::SetAccessControl($fileInfo, $acl)
+                } else {
+                    Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop
+                }
+            }
+        }
+        return $true
+    } catch {
+        Write-UniLog "Security Warning: Failed to apply secure ACL to '$Path': $($_.Exception.Message)" "Yellow"
+        return $false
+    }
+}
+
+# ===========================================================================
+# DPAPI USER IDENTITY & ACCOUNT SCOPE VALIDATION
+# ===========================================================================
+function Test-UniUserIdentity {
+    if ([Environment]::OSVersion.Platform -ne "Win32NT") { return $true }
+    try {
+        $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $consoleUser = $null
+        try {
+            $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+            if ($cs -and $cs.UserName) { $consoleUser = $cs.UserName }
+        } catch { }
+
+        if ($consoleUser -and ($currentIdentity -ne $consoleUser)) {
+            Write-Host "Security Warning: Setup is executing as '$currentIdentity', but the active console user is '$consoleUser'." -ForegroundColor Yellow
+            Write-Host "DPAPI CurrentUser credentials encrypted under '$currentIdentity' cannot be decrypted by '$consoleUser'." -ForegroundColor Yellow
+            Write-Host "For student use, please run 'uninet setup' in a standard, non-elevated console under '$consoleUser'." -ForegroundColor Yellow
+        }
+    } catch { }
+    return $true
+}
+
+# ===========================================================================
 # TASK SCHEDULER — PER-USER INTERACTIVE REGISTRATION
 # ===========================================================================
 function Register-UniScheduledTask {
@@ -1070,9 +1225,16 @@ function Register-UniScheduledTask {
 }
 
 # ===========================================================================
-# SETUP — FIX 1: PSCredential instead of unsafe unmanaged memory APIs
+# SETUP — SECURE CREDENTIAL CONFIGURATION & PERMISSION ISOLATION
 # ===========================================================================
 function Invoke-UniSetup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$false)][string]$TestUsername,
+        [Parameter(Mandatory=$false)][string]$TestPassword,
+        [Parameter(Mandatory=$false)][string]$CustomConfigDir
+    )
+
     Write-Host "========================================================" -ForegroundColor Cyan
     Write-Host "         UNIVERSITY OF MORATUWA - CAMPUS WI-FI          " -ForegroundColor Cyan
     Write-Host "               UniNet Auto-Connect Engine               " -ForegroundColor Cyan
@@ -1081,75 +1243,138 @@ function Invoke-UniSetup {
     $ssid = Get-ActiveSSID
     if ($ssid) { Write-Host "Active Wi-Fi: $ssid`n" }
 
-    $username = Read-Host "Student Username      "
+    # Step 1: User Identity Pre-flight Check
+    $null = Test-UniUserIdentity
+
+    # Resolve target directory and credentials file path with robust fallback
+    $targetConfigDir = if ($CustomConfigDir) { $CustomConfigDir } elseif ($global:ConfigDir) { $global:ConfigDir } elseif ($ConfigDir) { $ConfigDir } else { "$env:APPDATA\uninet" }
+    $targetCredsFile = Join-Path $targetConfigDir "credentials.json"
+
+    # Step 2: Credential Input & Validation
+    $username = if ($PSBoundParameters.ContainsKey('TestUsername')) { $TestUsername } else { Read-Host "Student Username      " }
     if ([string]::IsNullOrWhiteSpace($username)) {
         Write-Host "Error: Username cannot be empty." -ForegroundColor Red
-        return
+        $global:LASTEXITCODE = 1
+        return $false
     }
 
-    $securePass = Read-Host "Network Password      " -AsSecureString
-
-    # PSCredential.GetNetworkCredential() is the standard way to extract a plain-text password
-    $credential = New-Object System.Management.Automation.PSCredential("uom", $securePass)
-    $plainPass  = $credential.GetNetworkCredential().Password
+    $plainPass = ""
+    if ($PSBoundParameters.ContainsKey('TestPassword')) {
+        $plainPass = $TestPassword
+    } else {
+        $securePass = Read-Host "Network Password      " -AsSecureString
+        if ($securePass) {
+            $credential = New-Object System.Management.Automation.PSCredential("uom", $securePass)
+            $plainPass  = $credential.GetNetworkCredential().Password
+        }
+    }
 
     if ([string]::IsNullOrWhiteSpace($plainPass)) {
         Write-Host "Error: Password cannot be empty." -ForegroundColor Red
-        return
+        $global:LASTEXITCODE = 1
+        return $false
     }
 
-    if (-not (Test-Path $ConfigDir)) {
-        New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
-    }
-
-    # Restrict ACL on user config directory
+    # Step 3: Directory Creation & Strict DACL Protection
     try {
-        $acl = Get-Acl $ConfigDir
-        $acl.SetAccessRuleProtection($true, $false)
-        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $userRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $acl.AddAccessRule($userRule)
-        $acl.AddAccessRule($adminRule)
-        Set-Acl -Path $ConfigDir -AclObject $acl
-    } catch { }
+        if (-not (Test-Path $targetConfigDir)) {
+            New-Item -ItemType Directory -Path $targetConfigDir -Force -ErrorAction Stop | Out-Null
+        }
+    } catch {
+        Write-Host "Error: Failed to create configuration directory at '$targetConfigDir': $($_.Exception.Message)" -ForegroundColor Red
+        $global:LASTEXITCODE = 1
+        return $false
+    }
 
-    # Save credentials encrypted with DPAPI (CurrentUser scope)
+    $dirAclOk = Set-UniSecureAcl -Path $targetConfigDir -IsDirectory
+    if (-not $dirAclOk) {
+        Write-Host "Security Error: Failed to enforce secure ACL permissions on '$targetConfigDir'. Setup aborted." -ForegroundColor Red
+        $global:LASTEXITCODE = 1
+        return $false
+    }
+
+    # Step 4: DPAPI Encryption & Round-Trip Validation
     try {
         $encPass = Protect-Secret $plainPass
         if ([string]::IsNullOrEmpty($encPass)) {
             Write-Host "Error: Failed to encrypt credentials. Setup aborted." -ForegroundColor Red
-            return
+            $global:LASTEXITCODE = 1
+            return $false
+        }
+        $verifyDec = Unprotect-Secret $encPass
+        if ($verifyDec -ne $plainPass) {
+            Write-Host "Security Error: DPAPI encryption validation failed (round-trip decryption mismatch). Setup aborted." -ForegroundColor Red
+            $global:LASTEXITCODE = 1
+            return $false
         }
     } catch {
         Write-Host "Security Error: Credential protection failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "Credentials were NOT stored to prevent plaintext exposure." -ForegroundColor Yellow
-        return
+        $global:LASTEXITCODE = 1
+        return $false
     }
 
     $isEncrypted = ($encPass -ne $plainPass)
     if ([Environment]::OSVersion.Platform -eq "Win32NT" -and -not $isEncrypted) {
         Write-Host "Security Error: DPAPI encryption was bypassed on Windows. Setup aborted." -ForegroundColor Red
-        return
+        $global:LASTEXITCODE = 1
+        return $false
     }
 
     $data = @{ username = $username; password = $encPass; encrypted = $isEncrypted } | ConvertTo-Json
 
-    Set-Content -Path $CredsFile -Value $data -Encoding UTF8
+    # Step 5: Secure Credential File Writing & File-Level DACL Application
+    try {
+        Set-Content -Path $targetCredsFile -Value $data -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-Host "Error: Failed to write credentials file at '$targetCredsFile': $($_.Exception.Message)" -ForegroundColor Red
+        $global:LASTEXITCODE = 1
+        return $false
+    }
+
+    $fileAclOk = Set-UniSecureAcl -Path $targetCredsFile
+    if (-not $fileAclOk) {
+        Write-Host "Security Error: Failed to enforce secure ACL permissions on '$targetCredsFile'. Rolling back credentials file." -ForegroundColor Red
+        Remove-Item -Path $targetCredsFile -Force -ErrorAction SilentlyContinue
+        $global:LASTEXITCODE = 1
+        return $false
+    }
+
+    # Step 6: Post-Write Verification of Resulting Configuration
+    try {
+        if (-not (Test-Path $targetCredsFile)) { throw "Credential file not found after write." }
+        $savedContent = Get-Content -Path $targetCredsFile -Raw -ErrorAction Stop | ConvertFrom-Json
+        if (-not $savedContent.username -or -not $savedContent.password) { throw "Saved credential file is missing required fields." }
+        $decryptedSaved = Unprotect-Secret $savedContent.password
+        if ($decryptedSaved -ne $plainPass) { throw "Saved credentials cannot be decrypted or do not match original password." }
+    } catch {
+        Write-Host "Security Error: Credential verification failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Rolling back credentials file to prevent invalid state." -ForegroundColor Yellow
+        Remove-Item -Path $targetCredsFile -Force -ErrorAction SilentlyContinue
+        $global:LASTEXITCODE = 1
+        return $false
+    }
 
     # Security: Remove any legacy shared credentials file in ProgramData
-    Remove-Item -Path $SysCredsFile -Force -ErrorAction SilentlyContinue
+    if (-not [string]::IsNullOrWhiteSpace($SysCredsFile) -and (Test-Path $SysCredsFile)) {
+        Remove-Item -Path $SysCredsFile -Force -ErrorAction SilentlyContinue
+    }
 
-    # Register per-user auto-connect task in Task Scheduler
-    Register-UniScheduledTask
+    # Step 7: Register per-user auto-connect task in Task Scheduler
+    $taskRegistered = Register-UniScheduledTask
+    if (-not $taskRegistered) {
+        Write-UniLog "Notice: Scheduled task auto-connect could not be registered automatically." "Yellow"
+    }
 
     # Attempt login immediately if on campus Wi-Fi
     if ($ssid -and (Test-UniversityNetwork $ssid)) {
         if (-not (Test-IsOnline)) { Invoke-UniLogin }
     }
 
+    # Step 8: Configure University Wi-Fi Profiles
     Add-TrustedNetworks
 
+    # Success output — ONLY rendered when all security-critical operations succeeded
     Write-Host "`n========================================================" -ForegroundColor Green
     Write-Host "[+] Credentials securely saved!" -ForegroundColor Green
     Write-Host "You are all set!`n" -ForegroundColor Green
@@ -1159,6 +1384,9 @@ function Invoke-UniSetup {
     Write-Host "  - UoM.Wireless   (Aruba Networks)" -ForegroundColor Green
     Write-Host "  - UoM-Wireless   (Ruijie Networks)" -ForegroundColor Green
     Write-Host "========================================================`n" -ForegroundColor Green
+
+    $global:LASTEXITCODE = 0
+    return $true
 }
 
 # ===========================================================================
