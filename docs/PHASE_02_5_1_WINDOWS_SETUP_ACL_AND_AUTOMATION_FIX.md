@@ -139,7 +139,17 @@ function Set-UniSecureAcl {
         if ($IsDirectory) {
             $dirInfo = New-Object System.IO.DirectoryInfo($Path)
             # Scoped strictly to Access (DACL) — ZERO SACL/Audit rules queried
-            $acl = $dirInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            $acl = $null
+            if ($dirInfo.PSObject.Methods['GetAccessControl']) {
+                $acl = $dirInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            } else {
+                $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
+                if ($aclExt) {
+                    $acl = $aclExt::GetAccessControl($dirInfo, [System.Security.AccessControl.AccessControlSections]::Access)
+                } else {
+                    $acl = Get-Acl -Path $Path
+                }
+            }
             $acl.SetAccessRuleProtection($true, $false)
 
             # Strip unprivileged ACEs (BUILTIN\Users, Everyone)
@@ -162,20 +172,26 @@ function Set-UniSecureAcl {
             if ($dirInfo.PSObject.Methods['SetAccessControl']) {
                 $dirInfo.SetAccessControl($acl)
             } else {
-                $aclExt = [System.AppDomain]::CurrentDomain.GetAssemblies() |
-                    ForEach-Object { $_.GetType("System.IO.FileSystemAclExtensions") } |
-                    Where-Object { $_ -ne $null } | Select-Object -First 1
+                $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
                 if ($aclExt) {
-                    $setMethod = $aclExt.GetMethod("SetAccessControl", @([System.IO.DirectoryInfo], [System.Security.AccessControl.DirectorySecurity]))
-                    if ($setMethod) { $setMethod.Invoke($null, @($dirInfo, $acl)) }
-                    else { Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop }
+                    $aclExt::SetAccessControl($dirInfo, $acl)
                 } else {
                     Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop
                 }
             }
         } else {
             $fileInfo = New-Object System.IO.FileInfo($Path)
-            $acl = $fileInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            $acl = $null
+            if ($fileInfo.PSObject.Methods['GetAccessControl']) {
+                $acl = $fileInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            } else {
+                $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
+                if ($aclExt) {
+                    $acl = $aclExt::GetAccessControl($fileInfo, [System.Security.AccessControl.AccessControlSections]::Access)
+                } else {
+                    $acl = Get-Acl -Path $Path
+                }
+            }
             $acl.SetAccessRuleProtection($true, $false)
 
             $usersSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-545")
@@ -196,13 +212,9 @@ function Set-UniSecureAcl {
             if ($fileInfo.PSObject.Methods['SetAccessControl']) {
                 $fileInfo.SetAccessControl($acl)
             } else {
-                $aclExt = [System.AppDomain]::CurrentDomain.GetAssemblies() |
-                    ForEach-Object { $_.GetType("System.IO.FileSystemAclExtensions") } |
-                    Where-Object { $_ -ne $null } | Select-Object -First 1
+                $aclExt = ([System.Management.Automation.PSTypeName]"System.IO.FileSystemAclExtensions").Type
                 if ($aclExt) {
-                    $setMethod = $aclExt.GetMethod("SetAccessControl", @([System.IO.FileInfo], [System.Security.AccessControl.FileSecurity]))
-                    if ($setMethod) { $setMethod.Invoke($null, @($fileInfo, $acl)) }
-                    else { Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop }
+                    $aclExt::SetAccessControl($fileInfo, $acl)
                 } else {
                     Set-Acl -Path $Path -AclObject $acl -ErrorAction Stop
                 }
