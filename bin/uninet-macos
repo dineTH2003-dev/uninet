@@ -138,6 +138,16 @@ get_credentials() {
     [ -n "$USERNAME" ] && [ -n "$PASSWORD" ]
 }
 
+# Wait up to ~15s for the Wi-Fi link to get an IPv4 address (DHCP)
+wait_for_ip() {
+    local i
+    for i in $(seq 1 15); do
+        wifi_has_ip && return 0
+        sleep 1
+    done
+    return 0
+}
+
 # 6. Core Login Flow
 cmd_login() {
     local quiet=0
@@ -160,6 +170,7 @@ cmd_login() {
             ssid="(hidden SSID)"
         elif [ -z "$redir" ]; then
             [ $quiet -eq 1 ] && echo "$(date '+%F %T') hidden SSID, no captive portal redirect, nothing to do"
+            [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet (no captive portal login needed).${RESET}"
             exit 0   # online or no portal: nothing to do
         fi
     fi
@@ -747,7 +758,7 @@ cmd_optimize() {
         iface="$(get_wifi_interface)"
         if networksetup -setairportnetwork "$iface" "$top_ssid" 2>&1; then
             echo -e "${GREEN}✔ Successfully connected to $top_ssid!${RESET}"
-            sleep 1
+            wait_for_ip
         else
             echo -e "${YELLOW}Warning: Connection attempt to $top_ssid failed.${RESET}"
         fi
@@ -765,7 +776,7 @@ cmd_optimize() {
         iface="$(get_wifi_interface)"
         if networksetup -setairportnetwork "$iface" "$top_ssid" 2>&1; then
             echo -e "${GREEN}✔ Successfully connected to $top_ssid!${RESET}"
-            sleep 1
+            wait_for_ip
         else
             echo -e "${YELLOW}Warning: Connection switch failed. Falling back to active network.${RESET}"
         fi
