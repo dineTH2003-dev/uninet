@@ -42,6 +42,13 @@ log() {
     echo -e "${CYAN}[UniNet]${RESET} $*"
 }
 
+# Desktop notification (background/quiet runs only; never blocks login)
+notify() {
+    local title="$1" msg="$2"
+    [ "${UNINET_NO_NOTIFY:-0}" = "1" ] && return 0
+    osascript -e "display notification \"${msg//\"/}\" with title \"UniNet: ${title//\"/}\"" >/dev/null 2>&1 || true
+}
+
 # 1. Get primary Wi-Fi interface (usually en0 on MacBooks)
 get_wifi_interface() {
     networksetup -listallhardwareports 2>/dev/null | awk '/Wi-Fi|AirPort/{getline; print $2}' | head -n 1 || echo "en0"
@@ -187,6 +194,7 @@ cmd_login() {
 
     if ! get_credentials; then
         log "${RED}Error: No saved credentials found in $USER_CREDS. Run 'uninet setup' first.${RESET}"
+        [ $quiet -eq 1 ] && notify "Login failed" "No saved credentials. Run: uninet setup"
         exit 1
     fi
 
@@ -341,15 +349,18 @@ cmd_login() {
     sleep 1
     if is_online; then
         [ $quiet -eq 0 ] && log "${GREEN}✔ Successfully connected! Internet is now active on $ssid.${RESET}"
+        [ $quiet -eq 1 ] && notify "Connected" "Logged in to $ssid"
         exit 0
     else
         # Allow a 2-second gateway settling grace period
         sleep 2
         if is_online; then
             [ $quiet -eq 0 ] && log "${GREEN}✔ Successfully connected! Internet is now active on $ssid.${RESET}"
+        [ $quiet -eq 1 ] && notify "Connected" "Logged in to $ssid"
             exit 0
         fi
         [ $quiet -eq 0 ] && log "${YELLOW}Notice: Credentials submitted. Checking connection...${RESET}"
+        [ $quiet -eq 1 ] && notify "Login may have failed" "Still offline on $ssid. Run: uninet login"
         exit 0
     fi
 }
