@@ -148,6 +148,18 @@ wait_for_ip() {
     return 0
 }
 
+# One "you're online" banner per Wi-Fi join (de-duplicates bursts of network
+# change events within 60s)
+notify_online_once() {
+    local name="$1" stamp="/tmp/uninet_online_$UID" now last=0
+    now="$(date +%s)"
+    [ -f "$stamp" ] && last="$(cat "$stamp" 2>/dev/null || echo 0)"
+    if [ $((now - last)) -ge 60 ]; then
+        notify "Connected" "Online on $name"
+    fi
+    echo "$now" > "$stamp"
+}
+
 # 6. Core Login Flow
 cmd_login() {
     local quiet=0
@@ -170,6 +182,7 @@ cmd_login() {
             ssid="(hidden SSID)"
         elif [ -z "$redir" ]; then
             [ $quiet -eq 1 ] && echo "$(date '+%F %T') hidden SSID, no captive portal redirect, nothing to do"
+            [ $quiet -eq 1 ] && notify_online_once "UoM Wi-Fi"
             [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet (no captive portal login needed).${RESET}"
             exit 0   # online or no portal: nothing to do
         fi
@@ -200,6 +213,7 @@ cmd_login() {
     if is_online; then
         [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
         [ $quiet -eq 1 ] && echo "$(date '+%F %T') already online on $ssid, nothing to do"
+        [ $quiet -eq 1 ] && notify_online_once "$ssid"
         exit 0
     fi
 
