@@ -156,6 +156,7 @@ cmd_login() {
     # Check if already online
     if is_online; then
         [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
+        [ $quiet -eq 1 ] && echo "$(date '+%F %T') already online on $ssid, nothing to do"
         exit 0
     fi
 
