@@ -152,6 +152,7 @@ cmd_login() {
             ssid_hidden=1
             ssid="(hidden SSID)"
         elif [ -z "$redir" ]; then
+            [ $quiet -eq 1 ] && echo "$(date '+%F %T') hidden SSID, no captive portal redirect, nothing to do"
             exit 0   # online or no portal: nothing to do
         fi
     fi
