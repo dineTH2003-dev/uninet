@@ -521,10 +521,52 @@ calculate_ap_score() {
     echo $((sig_score + band_bonus + rate_score + act_bonus))
 }
 
+# CoreWLAN-based scan (macOS without the legacy airport tool). Needs the
+# Swift toolchain (Xcode Command Line Tools). BSSID is redacted by macOS.
+scan_networks_corewlan() {
+    local filter_mode="${1:-campus}"
+    command -v swift >/dev/null 2>&1 || return 0
+
+    local current_ssid
+    current_ssid="$(get_active_ssid)"
+
+    local raw
+    raw="$(swift - 2>/dev/null <<'SWIFT' || true
+import CoreWLAN
+if let c = CWWiFiClient.shared().interface(), let n = try? c.scanForNetworks(withName: nil) {
+    for x in n { print("\(x.ssid ?? "")\t\(x.rssiValue)\t\(x.wlanChannel?.channelNumber ?? 0)") }
+}
+SWIFT
+)"
+    [ -z "$raw" ] && return 0
+
+    local ssid rssi channel
+    while IFS=$'\t' read -r ssid rssi channel || [ -n "$ssid" ]; do
+        [ -z "$ssid" ] && continue
+        if [ "$filter_mode" != "all" ] && ! is_university_network "$ssid"; then
+            continue
+        fi
+        local sig=$(( (rssi + 100) * 2 ))
+        [ "$sig" -lt 0 ] && sig=0
+        [ "$sig" -gt 100 ] && sig=100
+        local is_5ghz=0 band_label="2.4 GHz" rate=130
+        if [ "$channel" -ge 36 ]; then
+            is_5ghz=1; band_label="5.0 GHz"; rate=866
+        fi
+        local is_active=0
+        [ -n "$current_ssid" ] && [ "$ssid" = "$current_ssid" ] && is_active=1
+        printf "%d\t%d\t%s\t%s\t%s\t%s Mbit/s\t%s\n" \
+            "$(calculate_ap_score "$sig" "$is_5ghz" "$rate" "$is_active")" \
+            "$is_active" "$ssid" "-" "$band_label" "$rate" "$sig"
+    done <<< "$raw"
+}
+
 scan_networks_macos() {
     local filter_mode="${1:-campus}"
     local airport_cmd="/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
     if [ ! -x "$airport_cmd" ]; then
+        # The airport tool was removed in recent macOS; scan via CoreWLAN.
+        scan_networks_corewlan "$filter_mode"
         return
     fi
 

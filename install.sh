@@ -231,7 +231,7 @@ if [ "$PLATFORM" = "linux" ]; then
 
 elif [ "$PLATFORM" = "macos" ]; then
     mkdir -p "$HOME/Library/LaunchAgents"
-    cp "$HOOK_SRC" "$PLIST_TARGET"
+    sed "s|__UNINET_BIN__|$TARGET_BIN|g" "$HOOK_SRC" > "$PLIST_TARGET"
     launchctl unload "$PLIST_TARGET" 2>/dev/null || true
     if launchctl load "$PLIST_TARGET" 2>/dev/null; then
         DISPATCHER_INSTALLED=true
