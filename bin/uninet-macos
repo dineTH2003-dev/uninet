@@ -51,7 +51,23 @@ get_wifi_interface() {
 get_active_ssid() {
     local iface
     iface="$(get_wifi_interface)"
-    networksetup -getairportnetwork "$iface" 2>/dev/null | awk -F': ' '{print $2}' || true
+    local ssid
+    ssid="$(networksetup -getairportnetwork "$iface" 2>/dev/null | awk -F': ' '{print $2}' || true)"
+    # macOS 14.4+ redacts/hides the SSID without Location permission, and the
+    # command then reports "not associated". Fall back to system_profiler.
+    if [ -z "$ssid" ] || [[ "$ssid" == "You are not associated"* ]]; then
+        ssid="$(system_profiler SPAirPortDataType 2>/dev/null \
+            | awk '/Current Network Information:/{getline; gsub(/^[ \t]+|:[ \t]*$/, ""); print; exit}' || true)"
+    fi
+    case "$ssid" in
+        "<redacted>"|"") echo "" ;;
+        *) echo "$ssid" ;;
+    esac
+}
+
+# True if the Wi-Fi link is up (has an IPv4 address) even if the SSID is hidden
+wifi_has_ip() {
+    ipconfig getifaddr "$(get_wifi_interface)" >/dev/null 2>&1
 }
 
 # 3. Check if SSID matches university patterns
@@ -125,6 +141,21 @@ cmd_login() {
     local ssid
     ssid="$(get_active_ssid)"
 
+    local ssid_hidden=0
+    if [ -z "$ssid" ] && wifi_has_ip; then
+        # Connected but SSID is hidden by macOS privacy. Only continue if the
+        # captive portal redirect points at a university host (never send
+        # credentials to an unknown portal).
+        local redir
+        redir="$(curl -s -o /dev/null -w "%{redirect_url}" --connect-timeout 4 "$PROBE_URL" || true)"
+        if [[ "$redir" =~ ^https?://[^/]*\.uom\.lk ]]; then
+            ssid_hidden=1
+            ssid="(hidden SSID)"
+        elif [ -z "$redir" ]; then
+            exit 0   # online or no portal: nothing to do
+        fi
+    fi
+
     if [ -z "$ssid" ] || [ "$ssid" = "You are not associated with an AirPort network." ]; then
         if [ $quiet -eq 0 ]; then
             log "Not connected to Wi-Fi. Scanning for campus networks..."
@@ -141,7 +172,7 @@ cmd_login() {
     fi
 
     # 2ms exit if not university network
-    if ! is_university_network "$ssid"; then
+    if [ $ssid_hidden -eq 0 ] && ! is_university_network "$ssid"; then
         [ $quiet -eq 0 ] && log "Connected to non-university Wi-Fi ($ssid). Exiting."
         exit 0
     fi
