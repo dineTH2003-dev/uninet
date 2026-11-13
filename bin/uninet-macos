@@ -42,6 +42,13 @@ log() {
     echo -e "${CYAN}[UniNet]${RESET} $*"
 }
 
+# Desktop notification (background/quiet runs only; never blocks login)
+notify() {
+    local title="$1" msg="$2"
+    [ "${UNINET_NO_NOTIFY:-0}" = "1" ] && return 0
+    osascript -e "display notification \"${msg//\"/}\" with title \"UniNet: ${title//\"/}\"" >/dev/null 2>&1 || true
+}
+
 # 1. Get primary Wi-Fi interface (usually en0 on MacBooks)
 get_wifi_interface() {
     networksetup -listallhardwareports 2>/dev/null | awk '/Wi-Fi|AirPort/{getline; print $2}' | head -n 1 || echo "en0"
@@ -51,7 +58,23 @@ get_wifi_interface() {
 get_active_ssid() {
     local iface
     iface="$(get_wifi_interface)"
-    networksetup -getairportnetwork "$iface" 2>/dev/null | awk -F': ' '{print $2}' || true
+    local ssid
+    ssid="$(networksetup -getairportnetwork "$iface" 2>/dev/null | awk -F': ' '{print $2}' || true)"
+    # macOS 14.4+ redacts/hides the SSID without Location permission, and the
+    # command then reports "not associated". Fall back to system_profiler.
+    if [ -z "$ssid" ] || [[ "$ssid" == "You are not associated"* ]]; then
+        ssid="$(system_profiler SPAirPortDataType 2>/dev/null \
+            | awk '/Current Network Information:/{getline; gsub(/^[ \t]+|:[ \t]*$/, ""); print; exit}' || true)"
+    fi
+    case "$ssid" in
+        "<redacted>"|"") echo "" ;;
+        *) echo "$ssid" ;;
+    esac
+}
+
+# True if the Wi-Fi link is up (has an IPv4 address) even if the SSID is hidden
+wifi_has_ip() {
+    ipconfig getifaddr "$(get_wifi_interface)" >/dev/null 2>&1
 }
 
 # 3. Check if SSID matches university patterns
@@ -115,6 +138,28 @@ get_credentials() {
     [ -n "$USERNAME" ] && [ -n "$PASSWORD" ]
 }
 
+# Wait up to ~15s for the Wi-Fi link to get an IPv4 address (DHCP)
+wait_for_ip() {
+    local i
+    for i in $(seq 1 15); do
+        wifi_has_ip && return 0
+        sleep 1
+    done
+    return 0
+}
+
+# One "you're online" banner per Wi-Fi join (de-duplicates bursts of network
+# change events within 60s)
+notify_online_once() {
+    local name="$1" stamp="/tmp/uninet_online_$UID" now last=0
+    now="$(date +%s)"
+    [ -f "$stamp" ] && last="$(cat "$stamp" 2>/dev/null || echo 0)"
+    if [ $((now - last)) -ge 60 ]; then
+        notify "Connected" "Online on $name"
+    fi
+    echo "$now" > "$stamp"
+}
+
 # 6. Core Login Flow
 cmd_login() {
     local quiet=0
@@ -124,6 +169,24 @@ cmd_login() {
 
     local ssid
     ssid="$(get_active_ssid)"
+
+    local ssid_hidden=0
+    if [ -z "$ssid" ] && wifi_has_ip; then
+        # Connected but SSID is hidden by macOS privacy. Only continue if the
+        # captive portal redirect points at a university host (never send
+        # credentials to an unknown portal).
+        local redir
+        redir="$(curl -s -o /dev/null -w "%{redirect_url}" --connect-timeout 4 "$PROBE_URL" || true)"
+        if [[ "$redir" =~ ^https?://[^/]*\.uom\.lk ]]; then
+            ssid_hidden=1
+            ssid="(hidden SSID)"
+        elif [ -z "$redir" ]; then
+            [ $quiet -eq 1 ] && echo "$(date '+%F %T') hidden SSID, no captive portal redirect, nothing to do"
+            [ $quiet -eq 1 ] && notify_online_once "UoM Wi-Fi"
+            [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet (no captive portal login needed).${RESET}"
+            exit 0   # online or no portal: nothing to do
+        fi
+    fi
 
     if [ -z "$ssid" ] || [ "$ssid" = "You are not associated with an AirPort network." ]; then
         if [ $quiet -eq 0 ]; then
@@ -141,7 +204,7 @@ cmd_login() {
     fi
 
     # 2ms exit if not university network
-    if ! is_university_network "$ssid"; then
+    if [ $ssid_hidden -eq 0 ] && ! is_university_network "$ssid"; then
         [ $quiet -eq 0 ] && log "Connected to non-university Wi-Fi ($ssid). Exiting."
         exit 0
     fi
@@ -149,6 +212,8 @@ cmd_login() {
     # Check if already online
     if is_online; then
         [ $quiet -eq 0 ] && log "${GREEN}Already connected to the internet on $ssid.${RESET}"
+        [ $quiet -eq 1 ] && echo "$(date '+%F %T') already online on $ssid, nothing to do"
+        [ $quiet -eq 1 ] && notify_online_once "$ssid"
         exit 0
     fi
 
@@ -156,6 +221,7 @@ cmd_login() {
 
     if ! get_credentials; then
         log "${RED}Error: No saved credentials found in $USER_CREDS. Run 'uninet setup' first.${RESET}"
+        [ $quiet -eq 1 ] && notify "Login failed" "No saved credentials. Run: uninet setup"
         exit 1
     fi
 
@@ -310,15 +376,18 @@ cmd_login() {
     sleep 1
     if is_online; then
         [ $quiet -eq 0 ] && log "${GREEN}✔ Successfully connected! Internet is now active on $ssid.${RESET}"
+        [ $quiet -eq 1 ] && notify "Connected" "Logged in to $ssid"
         exit 0
     else
         # Allow a 2-second gateway settling grace period
         sleep 2
         if is_online; then
             [ $quiet -eq 0 ] && log "${GREEN}✔ Successfully connected! Internet is now active on $ssid.${RESET}"
+        [ $quiet -eq 1 ] && notify "Connected" "Logged in to $ssid"
             exit 0
         fi
         [ $quiet -eq 0 ] && log "${YELLOW}Notice: Credentials submitted. Checking connection...${RESET}"
+        [ $quiet -eq 1 ] && notify "Login may have failed" "Still offline on $ssid. Run: uninet login"
         exit 0
     fi
 }
@@ -363,7 +432,17 @@ cmd_status() {
     local ssid
     ssid="$(get_active_ssid)"
     echo -e "${BOLD}${CYAN}=== UniNet macOS Status ===${RESET}"
-    echo -e "${BOLD}Active Wi-Fi:${RESET}   ${ssid:-None}"
+    if [ -n "$ssid" ]; then
+        echo -e "${BOLD}Active Wi-Fi:${RESET}   $ssid"
+    elif wifi_has_ip; then
+        echo -e "${BOLD}Active Wi-Fi:${RESET}   Connected ${YELLOW}(name hidden by macOS privacy)${RESET}"
+    else
+        echo -e "${BOLD}Active Wi-Fi:${RESET}   None"
+    fi
+
+    local chan
+    chan="$(system_profiler SPAirPortDataType 2>/dev/null | awk '/Current Network Information:/{f=1} f&&/Channel:/{sub(/^[ \t]*Channel: /,""); print; exit}')"
+    [ -n "$chan" ] && echo -e "${BOLD}Channel/Band:${RESET}   $chan"
 
     if [ -n "$ssid" ]; then
         if is_university_network "$ssid"; then
@@ -490,10 +569,52 @@ calculate_ap_score() {
     echo $((sig_score + band_bonus + rate_score + act_bonus))
 }
 
+# CoreWLAN-based scan (macOS without the legacy airport tool). Needs the
+# Swift toolchain (Xcode Command Line Tools). BSSID is redacted by macOS.
+scan_networks_corewlan() {
+    local filter_mode="${1:-campus}"
+    command -v swift >/dev/null 2>&1 || return 0
+
+    local current_ssid
+    current_ssid="$(get_active_ssid)"
+
+    local raw
+    raw="$(swift - 2>/dev/null <<'SWIFT' || true
+import CoreWLAN
+if let c = CWWiFiClient.shared().interface(), let n = try? c.scanForNetworks(withName: nil) {
+    for x in n { print("\(x.ssid ?? "")\t\(x.rssiValue)\t\(x.wlanChannel?.channelNumber ?? 0)") }
+}
+SWIFT
+)"
+    [ -z "$raw" ] && return 0
+
+    local ssid rssi channel
+    while IFS=$'\t' read -r ssid rssi channel || [ -n "$ssid" ]; do
+        [ -z "$ssid" ] && continue
+        if [ "$filter_mode" != "all" ] && ! is_university_network "$ssid"; then
+            continue
+        fi
+        local sig=$(( (rssi + 100) * 2 ))
+        [ "$sig" -lt 0 ] && sig=0
+        [ "$sig" -gt 100 ] && sig=100
+        local is_5ghz=0 band_label="2.4 GHz" rate=130
+        if [ "$channel" -ge 36 ]; then
+            is_5ghz=1; band_label="5.0 GHz"; rate=866
+        fi
+        local is_active=0
+        [ -n "$current_ssid" ] && [ "$ssid" = "$current_ssid" ] && is_active=1
+        printf "%d\t%d\t%s\t%s\t%s\t%s Mbit/s\t%s\n" \
+            "$(calculate_ap_score "$sig" "$is_5ghz" "$rate" "$is_active")" \
+            "$is_active" "$ssid" "-" "$band_label" "$rate" "$sig"
+    done <<< "$raw"
+}
+
 scan_networks_macos() {
     local filter_mode="${1:-campus}"
     local airport_cmd="/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
     if [ ! -x "$airport_cmd" ]; then
+        # The airport tool was removed in recent macOS; scan via CoreWLAN.
+        scan_networks_corewlan "$filter_mode"
         return
     fi
 
@@ -651,7 +772,7 @@ cmd_optimize() {
         iface="$(get_wifi_interface)"
         if networksetup -setairportnetwork "$iface" "$top_ssid" 2>&1; then
             echo -e "${GREEN}✔ Successfully connected to $top_ssid!${RESET}"
-            sleep 1
+            wait_for_ip
         else
             echo -e "${YELLOW}Warning: Connection attempt to $top_ssid failed.${RESET}"
         fi
@@ -669,7 +790,7 @@ cmd_optimize() {
         iface="$(get_wifi_interface)"
         if networksetup -setairportnetwork "$iface" "$top_ssid" 2>&1; then
             echo -e "${GREEN}✔ Successfully connected to $top_ssid!${RESET}"
-            sleep 1
+            wait_for_ip
         else
             echo -e "${YELLOW}Warning: Connection switch failed. Falling back to active network.${RESET}"
         fi

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- Desktop notifications for background logins on macOS (`osascript`) and Linux (`notify-send`): connected, login may have failed, missing credentials. On macOS, one "online" banner per Wi-Fi join. Disable with `UNINET_NO_NOTIFY=1`.
+- macOS `status` shows connection state and channel/band even when the SSID is hidden.
+- Timestamped log lines for background runs that exit early.
+
+### Fixed
+- macOS: Wi-Fi detection when macOS hides the SSID (Location privacy). Falls back to `system_profiler`, and only proceeds if the portal redirects to a `*.uom.lk` host.
+- macOS: `scan`/`optimize` use CoreWLAN (Swift) when the legacy `airport` tool is missing.
+- macOS: LaunchAgent now uses the installed binary path, triggers on `/var/run/resolv.conf` changes (event-only, no polling) and sets a PATH.
+- macOS: wait for DHCP after joining a network before probing the portal.
+
 ## [0.1.0] - 2026-09-18
 
 ### Added
