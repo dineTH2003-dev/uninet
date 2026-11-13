@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- Desktop notifications for background logins on macOS (`osascript`) and Linux (`notify-send`): connected, login may have failed, missing credentials. Disable with `UNINET_NO_NOTIFY=1`.
+
 ## [0.1.0] - 2026-09-18
 
 ### Added
