@@ -394,7 +394,17 @@ cmd_status() {
     local ssid
     ssid="$(get_active_ssid)"
     echo -e "${BOLD}${CYAN}=== UniNet macOS Status ===${RESET}"
-    echo -e "${BOLD}Active Wi-Fi:${RESET}   ${ssid:-None}"
+    if [ -n "$ssid" ]; then
+        echo -e "${BOLD}Active Wi-Fi:${RESET}   $ssid"
+    elif wifi_has_ip; then
+        echo -e "${BOLD}Active Wi-Fi:${RESET}   Connected ${YELLOW}(name hidden by macOS privacy)${RESET}"
+    else
+        echo -e "${BOLD}Active Wi-Fi:${RESET}   None"
+    fi
+
+    local chan
+    chan="$(system_profiler SPAirPortDataType 2>/dev/null | awk '/Current Network Information:/{f=1} f&&/Channel:/{sub(/^[ \t]*Channel: /,""); print; exit}')"
+    [ -n "$chan" ] && echo -e "${BOLD}Channel/Band:${RESET}   $chan"
 
     if [ -n "$ssid" ]; then
         if is_university_network "$ssid"; then
